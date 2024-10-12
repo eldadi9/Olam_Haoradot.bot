@@ -1,118 +1,144 @@
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import os
 import sqlite3
+import zipfile
 import asyncio
 import platform
+from datetime import datetime
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 
 TOKEN = '7769754941:AAHOUYo_OvNEqIaxYeRQeH_6yQjOo_iMcaA'
+PASSWORD = 'olam_tov'  # סיסמת ZIP
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('ברוך הבא! שלח קובץ כדי שאוכל לעקוב אחרי מי שמוריד אותו או שלח את שם הקובץ כדי להוריד.')
-
-async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    file_id = update.message.document.file_id
-    file_name = update.message.document.file_name
-    username = user.username or "לא זמין"
-    first_name = user.first_name
-    last_name = user.last_name or "לא זמין"
-    
-    # שמירת פרטים בבסיס הנתונים
+def create_database():
+    """יוצר את בסיס הנתונים והטבלאות הדרושות אם הן לא קיימות."""
     conn = sqlite3.connect('downloads.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS files
-                 (file_id TEXT PRIMARY KEY, file_name TEXT, uploader_id INTEGER, username TEXT, first_name TEXT, last_name TEXT)''')
-    c.execute('''INSERT OR REPLACE INTO files (file_id, file_name, uploader_id, username, first_name, last_name)
-                 VALUES (?, ?, ?, ?, ?, ?)''', (file_id, file_name, user.id, username, first_name, last_name))
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS files (
+            file_id TEXT PRIMARY KEY,
+            file_name TEXT,
+            uploader_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            category TEXT,
+            upload_time TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
-    
-    await update.message.reply_text(f'הקובץ "{file_name}" נשמר במערכת. כדי להוריד אותו, שלח את השם שלו שוב.')
 
-async def download_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """תפריט ראשי."""
+    keyboard = [
+        [InlineKeyboardButton("📤 העלאת קובץ", callback_data='upload')],
+        [InlineKeyboardButton("📥 הורדת קבצים", callback_data='download')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
+
+async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """מבקש מהמשתמש לשלוח קובץ להעלאה."""
+    await update.callback_query.answer()
+    await update.callback_query.message.reply_text("אנא שלח את הקובץ להעלאה.")
+
+async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """טיפול בהעלאת קובץ ושמירתו בתיקייה הנכונה ובבסיס הנתונים."""
+    user = update.message.from_user
+    file = update.message.document
+    file_name = file.file_name
+    upload_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # קביעת הקטגוריה לפי הסיומת
+    category = 'פלייליסטים' if file_name.endswith(('.m3u', '.m3u8')) else 'אפליקציות' if file_name.endswith('.apk') else 'אחר'
+
+    # יצירת תיקייה לפי הקטגוריה ושמירת הקובץ שם
+    os.makedirs(f'uploads/{category}', exist_ok=True)
+    file_path = f'uploads/{category}/{file_name}'
+    new_file = await context.bot.get_file(file.file_id)
+    await new_file.download_to_drive(file_path)
+
+    # שמירת פרטי הקובץ בבסיס הנתונים
     conn = sqlite3.connect('downloads.db')
     c = conn.cursor()
-    c.execute('''SELECT file_name, uploader_id, username, first_name, last_name FROM files''')
+    c.execute('''
+        INSERT OR REPLACE INTO files (file_id, file_name, uploader_id, username, first_name, last_name, category, upload_time)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (file.file_id, file_name, user.id, user.username or "לא זמין", user.first_name, user.last_name or "לא זמין", category, upload_time))
+    conn.commit()
+    conn.close()
+
+    # חזרה עם תשובה למשתמש
+    await update.message.reply_text("תודה רבה! אחלה יום.")
+
+async def uploaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """מציג את כל הקבצים שהועלו ומי העלה אותם."""
+    conn = sqlite3.connect('downloads.db')
+    c = conn.cursor()
+    c.execute('SELECT file_name, username, uploader_id, category, upload_time FROM files')
     files = c.fetchall()
     conn.close()
-    
+
     if files:
-        response = "רשימת הקבצים והמשתמשים שהעלו אותם:\n"
-        for file in files:
-            response += (f'קובץ: {file[0]}, הועלה על ידי: {file[2]} (ID: {file[1]}, שם פרטי: {file[3]}, '
-                         f'שם משפחה: {file[4]})\n')
+        response = "רשימת הקבצים שהועלו:\n" + "\n".join(
+            [f"📄 {file[0]} - הועלה ע\"י {file[1]} (ID: {file[2]})\nקטגוריה: {file[3]}, זמן העלאה: {file[4]}" for file in files]
+        )
     else:
-        response = "אין כרגע קבצים במערכת."
-    
+        response = "לא נמצאו קבצים במערכת."
+
     await update.message.reply_text(response)
 
-async def file_request_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    requested_file_name = update.message.text.strip()
-    
-    # חיפוש הקובץ במערכת
-    conn = sqlite3.connect('downloads.db')
-    c = conn.cursor()
-    c.execute('''SELECT file_id, file_name FROM files WHERE file_name = ?''', (requested_file_name,))
-    result = c.fetchone()
-    
-    if result:
-        file_id, file_name = result
-        
-        # שמירת פרטי המשתמש שהוריד את הקובץ
-        c.execute('''CREATE TABLE IF NOT EXISTS downloads
-                     (download_id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, first_name TEXT, last_name TEXT, file_name TEXT, file_id TEXT)''')
-        c.execute('''INSERT INTO downloads (user_id, username, first_name, last_name, file_name, file_id)
-                     VALUES (?, ?, ?, ?, ?, ?)''', (user.id, user.username or user.first_name, user.first_name, user.last_name or "לא זמין", file_name, file_id))
-        conn.commit()
-        conn.close()
-        
-        # שליחת הקובץ למשתמש
-        await context.bot.send_document(chat_id=update.message.chat_id, document=file_id)
-        await update.message.reply_text(f'הקובץ "{file_name}" נשלח אליך.')
-    else:
-        conn.close()
-        await update.message.reply_text('הקובץ לא נמצא במערכת. וודא שהשם נכון.')
+async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """תפריט הורדות עם קטגוריות."""
+    await update.callback_query.answer()
+    keyboard = [
+        [InlineKeyboardButton("🎵 פלייליסטים חינם", callback_data='category_playlists')],
+        [InlineKeyboardButton("📲 אפליקציות", callback_data='category_apps')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.message.reply_text("בחר קטגוריה:", reply_markup=reply_markup)
 
-async def downloads_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect('downloads.db')
-    c = conn.cursor()
-    c.execute('''SELECT user_id, username, first_name, last_name, file_name FROM downloads''')
-    downloads = c.fetchall()
-    conn.close()
-    
-    if downloads:
-        response = "רשימת ההורדות:\n"
-        for download in downloads:
-            response += (f'משתמש: {download[1]} (ID: {download[0]}, שם פרטי: {download[2]}, '
-                         f'שם משפחה: {download[3]}), הוריד את הקובץ: {download[4]}\n')
-    else:
-        response = "אין כרגע הורדות במערכת."
-    
-    await update.message.reply_text(response)
+async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, category: str):
+    """יצירת ZIP עם סיסמה ושליחתו למשתמש."""
+    zip_path = f'{category}.zip'
+
+    # יצירת קובץ ZIP עם כל הקבצים בקטגוריה
+    with zipfile.ZipFile(zip_path, 'w') as zipf:
+        for root, _, files in os.walk(f'uploads/{category}'):
+            for file in files:
+                zipf.write(os.path.join(root, file), arcname=file)
+
+    # שליחת ה-ZIP עם הודעה על הסיסמה
+    await update.callback_query.message.reply_document(
+        document=open(zip_path, 'rb'),
+        caption=f'סיסמה לקובץ ZIP: {PASSWORD}'
+    )
 
 async def main():
+    create_database()
+
     app = Application.builder().token(TOKEN).build()
 
+    # הגדרת Handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("uploaded_files", uploaded_files))
+    app.add_handler(CallbackQueryHandler(upload_callback, pattern='upload'))
+    app.add_handler(CallbackQueryHandler(download_callback, pattern='download'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: download_zip_callback(u, c, 'פלייליסטים'), pattern='category_playlists'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: download_zip_callback(u, c, 'אפליקציות'), pattern='category_apps'))
     app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
-    app.add_handler(CommandHandler("info", download_info))
-    app.add_handler(CommandHandler("downloads", downloads_info))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, file_request_handler))
 
-    # שימוש ב-event loop שמותאם ל-Windows אם מדובר ב-Windows
+    # טיפול בלולאת האירועים
     if platform.system() == "Windows":
-        loop = asyncio.ProactorEventLoop()
-        asyncio.set_event_loop(loop)
-    else:
-        loop = asyncio.get_event_loop()
+        asyncio.set_event_loop(asyncio.ProactorEventLoop())
 
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
-    
+
     try:
-        await asyncio.Future()  # שמירה על הרצה עד שייבקשו עצירה
+        await asyncio.Future()
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
