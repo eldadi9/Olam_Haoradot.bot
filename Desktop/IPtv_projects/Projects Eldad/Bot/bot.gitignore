@@ -1,0 +1,31 @@
+# Ignore Windows system files
+Application Data/
+Cookies/
+Local Settings/
+My Documents/
+NetHood/
+PrintHood/
+Recent/
+SendTo/
+Start Menu/
+Templates/
+Desktop.ini
+
+# Ignore compiled files
+*.log
+*.tmp
+*.cache
+*.lnk
+
+# Ignore IDE-specific files
+.idea/
+.vscode/
+
+# Ignore other unnecessary folders
+OneDrive/
+PycharmProjects/
+Saved Games/
+Downloads/
+Music/
+Videos/
+Pictures/
