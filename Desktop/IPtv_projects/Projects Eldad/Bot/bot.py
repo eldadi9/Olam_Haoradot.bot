@@ -1,3 +1,4 @@
+
 import os
 import sqlite3
 import zipfile
@@ -10,6 +11,10 @@ from zipfile import ZipFile, ZIP_DEFLATED
 from threading import Lock  # מנעול למניעת כפילות בהורדה
 import shutil
 import tempfile
+import pandas as pd
+
+# Global database connection (persistent for better performance)
+DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 
 TOKEN = '7757317671:AAHlq8yWLzP4mrgEovVoVZb_2j9ilWt0OlQ'
 PASSWORD = 'olam_tov'  # סיסמת ZIP
@@ -17,12 +22,13 @@ PASSWORD = 'olam_tov'  # סיסמת ZIP
 # מנעול למניעת הורדות כפולות בו-זמנית
 download_lock = Lock()
 
-def create_database():
-    """יוצר את בסיס הנתונים והטבלאות הדרושות אם הן לא קיימות."""
-    conn = sqlite3.connect('downloads.db')
-    c = conn.cursor()
+# Global database connection
+DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 
-    # טבלת קבצים שהועלו
+def create_database():
+    """Creates database tables if they do not exist."""
+    c = DB_CONN.cursor()
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS files (
             file_id TEXT PRIMARY KEY,
@@ -36,7 +42,6 @@ def create_database():
         )
     ''')
 
-    # טבלת לוג הורדות
     c.execute('''
         CREATE TABLE IF NOT EXISTS downloads (
             download_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -49,8 +54,8 @@ def create_database():
         )
     ''')
 
-    conn.commit()
-    conn.close()
+    DB_CONN.commit()
+
 
 def create_secure_zip(file_paths, output_zip_path, password):
     """יוצר קובץ ZIP מוגן בסיסמה."""
@@ -65,42 +70,51 @@ def create_secure_zip(file_paths, output_zip_path, password):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """תפריט ראשי."""
-    print(update.message.from_user.id)  # הדפסת מזהה המשתמש למסוף
     keyboard = [
         [InlineKeyboardButton("📤 העלאת קובץ", callback_data='upload')],
-        [InlineKeyboardButton("📥 הורדת קבצים", callback_data='download')]
+        [InlineKeyboardButton("📥 הורדת קבצים", callback_data='download')],
+        [InlineKeyboardButton("📊 הצגת דוחות", callback_data='reports')]  # כפתור חדש לדוחות
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
+    if update.message:
+        await update.message.reply_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
+    else:
+        await update.callback_query.message.edit_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
 
 async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """מבקש מהמשתמש לשלוח קובץ להעלאה."""
     await update.callback_query.answer()
-    await update.callback_query.message.reply_text("אנא שלח את הקובץ להעלאה.")
+    await update.callback_query.message.edit_text("אנא שלח את הקובץ להעלאה.")
 
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מטפל בהעלאת קובץ ושומר את הנתונים בבסיס הנתונים."""
-    user = update.message.from_user
+    """Handles file uploads and saves them efficiently."""
+    user = update.callback_query.from_user
     file = update.message.document
     file_name = file.file_name
     upload_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    category = 'פלייליסטים' if file_name.endswith(('.m3u', '.m3u8')) else 'אפליקציות' if file_name.endswith('.apk') else 'אחר'
+    # Determine category based on file type
+    category = 'פלייליסטים' if file_name.endswith(('.m3u', '.m3u8')) else 'אפליקציות' if file_name.endswith(
+        '.apk') else 'אחר'
+
     os.makedirs(f'uploads/{category}', exist_ok=True)
     file_path = f'uploads/{category}/{file_name}'
+
     new_file = await context.bot.get_file(file.file_id)
+
+    # ✅ Corrected: Download file properly
     await new_file.download_to_drive(file_path)
 
-    conn = sqlite3.connect('downloads.db')
-    c = conn.cursor()
+    # Use the optimized global database connection
+    c = DB_CONN.cursor()
     c.execute('''
         INSERT OR REPLACE INTO files (file_id, file_name, uploader_id, username, first_name, last_name, category, upload_time)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (file.file_id, file_name, user.id, user.username or "לא זמין", user.first_name, user.last_name or "לא זמין", category, upload_time))
-    conn.commit()
-    conn.close()
+    ''', (file.file_id, file_name, user.id, user.username or "לא זמין", user.first_name, user.last_name or "לא זמין",
+          category, upload_time))
+    DB_CONN.commit()
 
-    await update.message.reply_text("תודה רבה! הקובץ הועלה בהצלחה.")
+    await update.message.reply_text("✅ הקובץ הועלה בהצלחה.")
 
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """תפריט הורדות עם קטגוריות."""
@@ -110,7 +124,7 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📲 אפליקציות", callback_data='category_apps')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.message.reply_text("בחר קטגוריה להורדה:", reply_markup=reply_markup)
+    await update.callback_query.message.edit_text("בחר קטגוריה להורדה:", reply_markup=reply_markup)
 
 async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, category: str):
     """יוצר ZIP מוגן בסיסמה ושולח למשתמש."""
@@ -131,7 +145,7 @@ async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
         if not file_paths:
             await update.callback_query.answer()
-            await update.callback_query.message.reply_text("אין קבצים בקטגוריה שנבחרה.")
+            await update.callback_query.message.edit_text("אין קבצים בקטגוריה שנבחרה.")
             return
 
         temp_dir = tempfile.mkdtemp()
@@ -167,8 +181,10 @@ async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def uploaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """מציג רשימה מסודרת של הקבצים שהועלו."""
-    if update.message.from_user.id != 7773889743:
-        await update.message.reply_text("אין לך הרשאה לצפות במידע זה.")
+    user = update.callback_query.from_user  # תיקון: שימוש נכון ב- CallbackQuery
+
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
         return
 
     conn = sqlite3.connect('downloads.db')
@@ -178,31 +194,24 @@ async def uploaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not files:
-        await update.message.reply_text("לא נמצאו קבצים.")
+        await update.callback_query.message.edit_text("📂 אין קבצים זמינים.")
+
         return
 
-    response = "📂 **רשימת קבצים שהועלו**\n"
-    response += "---------------------------------\n"
-    response += "{:<20} {:<10} {:<10} {:<10} {:<20}\n".format(
-        "שם הקובץ", "משתמש", "ID", "קטגוריה", "תאריך"
-    )
-    response += "---------------------------------\n"
-
+    response = "**📂 רשימת קבצים שהועלו:**\n"
     for file in files:
-        response += "{:<20} {:<10} {:<10} {:<10} {:<20}\n".format(
-            file[0][:20],  # שם הקובץ
-            file[1] or "לא זמין",  # שם המשתמש
-            file[2],  # ID
-            file[3],  # קטגוריה
-            file[4]  # תאריך
-        )
+        response += f"📄 {file[0]} | 👤 {file[1]} | 🆔 {file[2]} | 📂 {file[3]} | 📅 {file[4]}\n"
 
-    await update.message.reply_text(f"```{response}```", parse_mode="Markdown")
+    await update.callback_query.message.edit_text(response[:4000], parse_mode="Markdown")  # מגבלת טלגרם
+
+
 
 async def download_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """מציג לוג הורדות מסודר."""
-    if update.message.from_user.id != 7773889743:
-        await update.message.reply_text("אין לך הרשאה לצפות במידע זה.")
+    user = update.callback_query.from_user  # תיקון
+
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
         return
 
     conn = sqlite3.connect('downloads.db')
@@ -212,31 +221,43 @@ async def download_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not downloads:
-        await update.message.reply_text("לא נמצאו הורדות.")
+        await update.callback_query.message.edit_text("📥 אין הורדות זמינות.")
         return
 
-    response = "📥 **לוג הורדות:**\n\n"
+    response = "**📥 לוג הורדות:**\n"
     for log in downloads:
-        response += (
-            f"📄 שם הקובץ: {log[0]}\n"
-            f"👤 משתמש: {log[1] or 'לא זמין'} (ID: {log[2]})\n"
-            f"📅 תאריך: {log[3]}\n\n"
-        )
+        response += f"📄 {log[0]} | 👤 {log[1]} | 🆔 {log[2]} | 📅 {log[3]}\n"
 
-    await update.message.reply_text(response)
+    await update.callback_query.message.edit_text(response[:4000], parse_mode="Markdown")
+
 
 async def main():
     create_database()
 
     app = Application.builder().token(TOKEN).build()
 
+    # פקודות
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("uploaded_files", uploaded_files))
     app.add_handler(CommandHandler("download_logs", download_logs))
-    app.add_handler(CallbackQueryHandler(upload_callback, pattern='upload'))
-    app.add_handler(CallbackQueryHandler(download_callback, pattern='download'))
-    app.add_handler(CallbackQueryHandler(lambda u, c: download_zip_callback(u, c, 'פלייליסטים'), pattern='category_playlists'))
-    app.add_handler(CallbackQueryHandler(lambda u, c: download_zip_callback(u, c, 'אפליקציות'), pattern='category_apps'))
+    app.add_handler(CommandHandler("generate_reports", generate_reports))
+    app.add_handler(CommandHandler("stats_summary", stats_summary))
+
+    # CallbackQueryHandlers לתפריט הדוחות
+    app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
+    app.add_handler(CallbackQueryHandler(uploaded_files, pattern='uploaded_files'))
+    app.add_handler(CallbackQueryHandler(download_logs, pattern='download_logs'))
+    app.add_handler(CallbackQueryHandler(generate_reports, pattern='generate_reports'))
+    app.add_handler(CallbackQueryHandler(stats_summary, pattern='stats_summary'))
+
+    # חיבור לפונקציות שמייצרות גרפים
+    app.add_handler(CallbackQueryHandler(plot_top_uploaders, pattern='plot_top_uploaders'))
+    app.add_handler(CallbackQueryHandler(plot_download_activity, pattern='plot_download_activity'))
+
+    # כפתור חזרה לתפריט הראשי
+    app.add_handler(CallbackQueryHandler(start, pattern='start'))
+
+    # מאזין להעלאת קבצים
     app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
 
     if platform.system() == "Windows":
@@ -244,7 +265,7 @@ async def main():
 
     await app.initialize()
     await app.start()
-    await app.updater.start_polling()
+    await app.updater.start_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
     try:
         await asyncio.Future()
@@ -254,13 +275,6 @@ async def main():
         await app.updater.stop()
         await app.shutdown()
 
-# קוד קיים נשאר כפי שהוא
-
-# ייבוא ספריות נוספות
-import matplotlib.pyplot as plt
-import pandas as pd
-
-# פונקציות חדשות
 def load_data():
     """טוען נתונים מהמסד."""
     conn = sqlite3.connect('downloads.db')
@@ -271,23 +285,20 @@ def load_data():
     conn.close()
     return files_data, downloads_data
 
-def plot_top_uploaders(files_data):
-    """גרף של משתמשים שהעלו הכי הרבה קבצים."""
-    top_uploaders = files_data['username'].value_counts().head(10)
-    plt.figure(figsize=(10, 6))
-    top_uploaders.plot(kind='bar')
-    plt.title("משתמשים שהעלו הכי הרבה קבצים")
-    plt.xlabel("שם משתמש")
-    plt.ylabel("מספר קבצים שהועלו")
-    plt.tight_layout()
-    plt.savefig('top_uploaders.png')
-    plt.close()
+async def plot_download_activity(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """יוצר גרף של פעילות הורדות יומית ושולח אותו"""
+    import pandas as pd  # תיקון
+    import matplotlib.pyplot as plt
 
-def plot_download_activity(downloads_data):
-    """גרף פעילות הורדות לפי תאריכים."""
+    _, downloads_data = load_data()
+    if downloads_data.empty:
+        await update.callback_query.message.edit_text("⚠️ אין מספיק נתונים להצגת גרף.")
+        return
+
     downloads_data['download_time'] = pd.to_datetime(downloads_data['download_time'])
     downloads_data['date'] = downloads_data['download_time'].dt.date
     daily_downloads = downloads_data.groupby('date').size()
+
     plt.figure(figsize=(10, 6))
     daily_downloads.plot(kind='line', marker='o')
     plt.title("פעילות הורדות יומית")
@@ -298,32 +309,60 @@ def plot_download_activity(downloads_data):
     plt.savefig('daily_downloads.png')
     plt.close()
 
+    await update.callback_query.message.reply_document(
+        document=open('daily_downloads.png', 'rb'),
+        caption="📈 גרף פעילות הורדות יומית"
+    )
+
 async def generate_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """יוצר דוחות ויזואליים ושולח למשתמש."""
-    if update.message.from_user.id != 7773889743:
-        await update.message.reply_text("אין לך הרשאה לצפות במידע זה.")
+    user = update.callback_query.from_user  # תיקון
+
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
         return
 
-    files_data, downloads_data = load_data()
+    # ✨ הוספת הודעה לפני יצירת הדוחות
+    await update.callback_query.message.edit_text("🔎 יצירת דוחות... נא להמתין.")
 
-    # יצירת גרפים
-    plot_top_uploaders(files_data)
-    plot_download_activity(downloads_data)
+    await plot_top_uploaders(update, context)
+    await plot_download_activity(update, context)
 
-    # שליחת קבצי הגרפים למשתמש
-    await update.message.reply_document(
+    # ✨ לאחר השלמת הדוחות, עדכון המשתמש
+    await update.callback_query.message.edit_text("✅ דוחות נוצרו ונשלחו בהצלחה!")
+
+
+async def plot_top_uploaders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """יוצר גרף של המשתמשים שהעלו הכי הרבה קבצים ושולח אותו"""
+    import pandas as pd  # תיקון: ייבוא pandas
+    import matplotlib.pyplot as plt
+
+    files_data, _ = load_data()
+    if files_data.empty:
+        await update.callback_query.message.edit_text("⚠️ אין מספיק נתונים להצגת גרף.")
+        return
+
+    top_uploaders = files_data['username'].value_counts().head(10)
+    plt.figure(figsize=(10, 6))
+    top_uploaders.plot(kind='bar')
+    plt.title("משתמשים שהעלו הכי הרבה קבצים")
+    plt.xlabel("שם משתמש")
+    plt.ylabel("מספר קבצים שהועלו")
+    plt.tight_layout()
+    plt.savefig('top_uploaders.png')
+    plt.close()
+
+    await update.callback_query.message.reply_document(
         document=open('top_uploaders.png', 'rb'),
-        caption="גרף משתמשים שהעלו הכי הרבה קבצים"
-    )
-    await update.message.reply_document(
-        document=open('daily_downloads.png', 'rb'),
-        caption="גרף פעילות הורדות יומית"
+        caption="📊 גרף משתמשים שהעלו הכי הרבה קבצים"
     )
 
 async def stats_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """שולח למשתמש סיכום סטטיסטיקות כולל."""
-    if update.message.from_user.id != 7773889743:
-        await update.message.reply_text("אין לך הרשאה לצפות במידע זה.")
+    user = update.callback_query.from_user  # תיקון
+
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
         return
 
     files_data, downloads_data = load_data()
@@ -338,10 +377,34 @@ async def stats_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📥 סך כל ההורדות: {total_downloads}\n"
         f"📂 הקטגוריה הפופולרית ביותר: {top_category}"
     )
-    await update.message.reply_text(summary, parse_mode='Markdown')
+    await update.callback_query.message.edit_text(summary, parse_mode='Markdown')
 
-# הוספת הפונקציות החדשות להנדלרים של Telegram
+async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """תפריט כפתורים להצגת דוחות"""
+    await update.callback_query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton("📁 קבצים שהועלו", callback_data='uploaded_files')],
+        [InlineKeyboardButton("📥 לוג הורדות", callback_data='download_logs')],
+        [InlineKeyboardButton("📊 משתמשים שהעלו הכי הרבה קבצים", callback_data='plot_top_uploaders')],
+        [InlineKeyboardButton("📈 פעילות הורדות יומית", callback_data='plot_download_activity')],
+        [InlineKeyboardButton("📑 יצירת דוחות מלאים", callback_data='generate_reports')],
+        [InlineKeyboardButton("📊 סיכום סטטיסטיקות", callback_data='stats_summary')],
+        [InlineKeyboardButton("⬅️ חזרה לתפריט הראשי", callback_data='start')]
+    ]
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.message.edit_text("בחר דוח להצגה:", reply_markup=reply_markup)
 
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    import sys
+
+    if platform.system() == "Windows":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    if sys.version_info >= (3, 7):
+        asyncio.run(main())
+    else:
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(main())
