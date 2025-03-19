@@ -68,6 +68,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.callback_query.message.edit_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
 
+GROUP_ID = -1087968824  # Replace with your group's actual
+async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bans users from joining the group if they don't have a username (@handle)."""
+    if update.message.chat_id != GROUP_ID:
+        return  # Ignore other groups
+
+    for member in update.message.new_chat_members:
+        if not member.username:
+            await update.message.reply_text(
+                f"❌ {member.first_name}, לא ניתן להצטרף לקבוצה ללא שם משתמש (@)."
+            )
+            await context.bot.ban_chat_member(update.message.chat_id, member.id)  # Ban user permanently
+
 async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.edit_text("🔼 שלח את הקובץ להעלאה.")
@@ -221,8 +234,7 @@ async def main():
     app.add_handler(CommandHandler("download_logs", download_logs))
     app.add_handler(CommandHandler("generate_reports", generate_reports))
     app.add_handler(CommandHandler("stats_summary", stats_summary))
-
-
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
 
     # CallbackQueryHandlers לתפריט הדוחות
     app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
@@ -234,6 +246,8 @@ async def main():
     app.add_handler(CallbackQueryHandler(download_callback, pattern='download'))
     app.add_handler(CallbackQueryHandler(download_zip_playlists, pattern='category_playlists'))
     app.add_handler(CallbackQueryHandler(download_zip_apps, pattern='category_apps'))
+
+
 
     # חיבור לפונקציות שמייצרות גרפים
     app.add_handler(CallbackQueryHandler(plot_top_uploaders, pattern='plot_top_uploaders'))
@@ -342,9 +356,10 @@ async def plot_top_uploaders(update: Update, context: ContextTypes.DEFAULT_TYPE)
         caption="📊 גרף משתמשים שהעלו הכי הרבה קבצים"
     )
 
+
 async def stats_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """שולח למשתמש סיכום סטטיסטיקות כולל."""
-    user = update.callback_query.from_user  # תיקון
+    """שולח למשתמש סיכום סטטיסטיקות כולל ומידע נוסף על הורדות."""
+    user = update.callback_query.from_user
 
     if user.id != 7773889743:
         await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
@@ -354,21 +369,51 @@ async def stats_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total_uploads = len(files_data)
     total_downloads = len(downloads_data)
+
+    # Check if there are any downloads to prevent errors
+    if downloads_data.empty:
+        await update.callback_query.message.edit_text("⚠️ אין מספיק נתונים להצגה.")
+        return
+
     top_category = files_data['category'].value_counts().idxmax()
 
+    # Most downloaded file
+    most_downloaded_file = downloads_data['file_name'].value_counts().idxmax()
+    most_downloaded_file_count = downloads_data['file_name'].value_counts().max()
+
+    # User who downloaded the most files
+    top_downloader_id = downloads_data['downloader_id'].value_counts().idxmax()
+    top_downloader_downloads = downloads_data['downloader_id'].value_counts().max()
+    top_downloader_info = downloads_data[downloads_data['downloader_id'] == top_downloader_id].iloc[0]
+
+    top_downloader_username = top_downloader_info['username']
+    top_downloader_firstname = top_downloader_info['first_name']
+    top_downloader_lastname = top_downloader_info['last_name']
+
     summary = (
-        f"📊 **סיכום סטטיסטיקות**:\n"
-        f"📁 סך כל הקבצים שהועלו: {total_uploads}\n"
-        f"📥 סך כל ההורדות: {total_downloads}\n"
-        f"📂 הקטגוריה הפופולרית ביותר: {top_category}"
+        f"📊 **סיכום סטטיסטיקות כולל**:\n"
+        f"📁 **סך כל הקבצים שהועלו:** {total_uploads}\n"
+        f"📥 **סך כל ההורדות:** {total_downloads}\n"
+        f"📂 **הקטגוריה הפופולרית ביותר:** {top_category}\n\n"
+
+        f"🔥 **הקובץ שהורד הכי הרבה:**\n"
+        f"📄 `{most_downloaded_file}` ({most_downloaded_file_count} הורדות)\n\n"
+
+        f"👤 **משתמש שהוריד הכי הרבה קבצים:**\n"
+        f"🆔 `{top_downloader_id}`\n"
+        f"💬 @{top_downloader_username}\n"
+        f"🙍‍♂️ {top_downloader_firstname} {top_downloader_lastname}\n"
+        f"📥 **מספר ההורדות:** {top_downloader_downloads}"
     )
+
     await update.callback_query.message.edit_text(summary, parse_mode='Markdown')
 
 async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     keyboard = [
         [InlineKeyboardButton("📁 קבצים שהועלו", callback_data='uploaded_files')],
-        [InlineKeyboardButton("📥 לוג הורדות", callback_data='download_logs')],
+        [InlineKeyboardButton("👤 קבצים להורדה", callback_data='download_users_list')],
+        [InlineKeyboardButton("📥 הורדות - נתונים", callback_data='download_logs')],
         [InlineKeyboardButton("📊 משתמשים שהעלו הכי הרבה קבצים", callback_data='plot_top_uploaders')],
         [InlineKeyboardButton("📈 פעילות הורדות יומית", callback_data='plot_download_activity')],
         [InlineKeyboardButton("📑 יצירת דוחות מלאים", callback_data='generate_reports')],
