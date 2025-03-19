@@ -183,6 +183,8 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
               (file.file_id, file_name, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A", category, upload_time))
     DB_CONN.commit()
+
+    update_excel()  # ⬅️ Automatically updates Excel after each file upload
     await update.message.reply_text("✅ הקובץ הועלה בהצלחה.")
 
 
@@ -241,29 +243,39 @@ async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TY
         download_lock.release()
 
 async def uploaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מציג רשימה מסודרת של הקבצים שהועלו."""
-    user = update.callback_query.from_user  # תיקון: שימוש נכון ב- CallbackQuery
+    """מציג רשימה מסודרת של הקבצים שהועלו (Excel עם פילטרים)."""
+    user = update.callback_query.from_user
 
     if user.id != 7773889743:
         await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
         return
 
     conn = sqlite3.connect('downloads.db')
-    c = conn.cursor()
-    c.execute('SELECT file_name, username, uploader_id, category, upload_time FROM files')
-    files = c.fetchall()
+    df = pd.read_sql_query('SELECT file_name AS "שם הקובץ", username AS "שם משתמש", uploader_id AS "מזהה משתמש", category AS "קטגוריה", upload_time AS "זמן העלאה" FROM files', conn)
     conn.close()
 
-    if not files:
+    if df.empty:
         await update.callback_query.message.edit_text("📂 אין קבצים זמינים.")
-
         return
 
-    response = "**📂 רשימת קבצים שהועלו:**\n"
-    for file in files:
-        response += f"📄 {file[0]} | 👤 {file[1]} | 🆔 {file[2]} | 📂 {file[3]} | 📅 {file[4]}\n"
+    output_file = "uploaded_files.xlsx"
+    df.to_excel(output_file, index=False)
 
-    await update.callback_query.message.edit_text(response[:4000], parse_mode="Markdown")  # מגבלת טלגרם
+    await update.callback_query.message.reply_document(
+        document=open(output_file, 'rb'),
+        caption="📂 רשימת קבצים שהועלו (Excel מפורט עם אפשרות פילטר וסינון)"
+    )
+def update_excel():
+    conn = sqlite3.connect('downloads.db')
+    df = pd.read_sql_query(
+        'SELECT file_name AS "שם הקובץ", username AS "שם משתמש", uploader_id AS "מזהה משתמש", category AS "קטגוריה", upload_time AS "זמן העלאה" FROM files',
+        conn
+    )
+    conn.close()
+
+    output_path = r"C:\Users\Master_PC\Desktop\IPtv_projects\Projects Eldad\Bot\Upload Playlits\uploaded_files.xlsx"
+    df.to_excel(output_path, index=False)
+
 
 async def download_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """מציג לוג הורדות מסודר."""
