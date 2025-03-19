@@ -27,23 +27,19 @@ DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 
 def create_database():
     c = DB_CONN.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS files (
-            file_id TEXT PRIMARY KEY,
-            file_name TEXT,
-            uploader_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            category TEXT,
-            upload_time TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS downloads (
-            download_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS downloads_group (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_name TEXT,
             downloader_id INTEGER,
             username TEXT,
             first_name TEXT,
             last_name TEXT,
-            download_time TEXT)''')
+            chat_id INTEGER,
+            topic_name TEXT,
+            download_time TEXT
+        )
+    ''')
     DB_CONN.commit()
 
 
@@ -69,6 +65,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.edit_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
 
 GROUP_ID = -1087968824  # Replace with your group's actual
+TOPIC_NAME = "פלייליסטים"   # Your actual topic name
+
 async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bans users from joining the group if they don't have a username (@handle)."""
     if update.message.chat_id != GROUP_ID:
@@ -80,6 +78,54 @@ async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ {member.first_name}, לא ניתן להצטרף לקבוצה ללא שם משתמש (@)."
             )
             await context.bot.ban_chat_member(update.message.chat_id, member.id)  # Ban user permanently
+
+GROUP_ID = -1087968824  # replace with your actual group ID
+TOPIC_NAME = "פלייליסטים"  # replace with your actual topic name if different
+
+async def track_group_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Track file downloads specifically from a group under 'playlists' topic."""
+    message = update.message
+
+    if message.chat_id != GROUP_ID or (message.message_thread_id is None):
+        return  # Ignore messages not from the specific group/topic
+
+    topic = await context.bot.get_forum_topic(chat_id=message.chat_id, message_thread_id=message.message_thread_id)
+    if topic.name.lower() != TOPIC_NAME.lower():
+        return  # Only proceed if the topic matches exactly 'playlists'
+
+    if message.document:
+        file_name = message.document.file_name
+        user = message.from_user
+        download_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # Insert download details into the database
+        c = DB_CONN.cursor()
+        c.execute('''
+            INSERT INTO downloads_group (
+                file_name, downloader_id, username, first_name, last_name, chat_id, topic_name, download_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (file_name, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A",
+              message.chat_id, topic.name, download_time))
+        DB_CONN.commit()
+
+async def send_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    file_path = 'uploads/פלייליסטים/EG(Israel)17.3.25.m3u'  # Example file path
+    user = update.callback_query.from_user
+    interaction_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # Log interaction
+    c = DB_CONN.cursor()
+    c.execute('''
+        INSERT INTO file_interactions (file_name, user_id, username, first_name, last_name, interaction_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', ('EG(Israel)17.3.25.m3u', user.id, user.username or "N/A", user.first_name, user.last_name or "N/A", interaction_time))
+    DB_CONN.commit()
+
+    # Send file to user
+    await update.callback_query.message.reply_document(
+        document=open(file_path, 'rb'),
+        caption=f'📥 הנה הקובץ שלך: EG(Israel)17.3.25.m3u'
+    )
 
 async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -236,6 +282,7 @@ async def main():
     app.add_handler(CommandHandler("stats_summary", stats_summary))
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
 
+
     # CallbackQueryHandlers לתפריט הדוחות
     app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
     app.add_handler(CallbackQueryHandler(uploaded_files, pattern='uploaded_files'))
@@ -246,7 +293,9 @@ async def main():
     app.add_handler(CallbackQueryHandler(download_callback, pattern='download'))
     app.add_handler(CallbackQueryHandler(download_zip_playlists, pattern='category_playlists'))
     app.add_handler(CallbackQueryHandler(download_zip_apps, pattern='category_apps'))
-
+    app.add_handler(CallbackQueryHandler(group_download_summary, pattern='group_download_summary'))
+    app.add_handler(CallbackQueryHandler(send_playlist, pattern='download_playlist'))
+    app.add_handler(CallbackQueryHandler(playlist_download_report, pattern='playlist_download_report'))
 
 
     # חיבור לפונקציות שמייצרות גרפים
@@ -311,6 +360,33 @@ async def plot_download_activity(update: Update, context: ContextTypes.DEFAULT_T
     await update.callback_query.message.reply_document(
         document=open('daily_downloads.png', 'rb'),
         caption="📈 גרף פעילות הורדות יומית"
+    )
+async def playlist_download_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.callback_query.from_user
+
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
+        return
+
+    conn = sqlite3.connect('downloads.db')
+    query = '''
+        SELECT user_id, username, first_name, last_name, file_name, interaction_time
+        FROM file_interactions
+        WHERE file_name = ?
+    '''
+    df = pd.read_sql_query(query, conn, params=('EG(Israel)17.3.25.m3u',))
+    conn.close()
+
+    if df.empty:
+        await update.callback_query.message.edit_text("אין הורדות של הקובץ המבוקש.")
+        return
+
+    report_file = "playlist_user_interactions.xlsx"
+    df.to_excel(report_file, index=False)
+
+    await update.callback_query.message.reply_document(
+        document=open(report_file, 'rb'),
+        caption="📥 דוח מפורט: מי הוריד את הקובץ EG(Israel)17.3.25.m3u"
     )
 
 async def generate_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -407,17 +483,46 @@ async def stats_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await update.callback_query.message.edit_text(summary, parse_mode='Markdown')
+async def group_download_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.callback_query.from_user
+
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
+        return
+
+    conn = sqlite3.connect('downloads.db')
+    query = '''
+        SELECT downloader_id, username, first_name, last_name, file_name, download_time
+        FROM downloads_group WHERE chat_id = ? AND topic_name = ?
+    '''
+    df = pd.read_sql_query(query, conn, params=(GROUP_ID, TOPIC_NAME))
+    conn.close()
+
+    if df.empty:
+        await update.callback_query.message.edit_text("📥 אין הורדות מהקבוצה בנושא הנבחר.")
+        return
+
+    summary_file = "group_topic_downloads.xlsx"
+    df.to_excel(summary_file, index=False)
+
+    await update.callback_query.message.reply_document(
+        document=open(summary_file, 'rb'),
+        caption=f"📥 דוח הורדות מפורט מקבוצתך בנושא '{TOPIC_NAME}'"
+    )
+
 
 async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     keyboard = [
         [InlineKeyboardButton("📁 קבצים שהועלו", callback_data='uploaded_files')],
-        [InlineKeyboardButton("👤 קבצים להורדה", callback_data='download_users_list')],
-        [InlineKeyboardButton("📥 הורדות - נתונים", callback_data='download_logs')],
+        [InlineKeyboardButton("📥 לוג הורדות", callback_data='download_logs')],
         [InlineKeyboardButton("📊 משתמשים שהעלו הכי הרבה קבצים", callback_data='plot_top_uploaders')],
         [InlineKeyboardButton("📈 פעילות הורדות יומית", callback_data='plot_download_activity')],
         [InlineKeyboardButton("📑 יצירת דוחות מלאים", callback_data='generate_reports')],
         [InlineKeyboardButton("📊 סיכום סטטיסטיקות", callback_data='stats_summary')],
+        [InlineKeyboardButton("👤 רשימת משתמשים שהורידו קבצים", callback_data='download_users_list')],
+        [InlineKeyboardButton("📥 דוח הורדות פלייליסט", callback_data='playlist_download_report')],
+        [InlineKeyboardButton("📥 דוח הורדות בנושא 'פלייליסטים'", callback_data='group_download_summary')],
         [InlineKeyboardButton("⬅️ חזרה לתפריט הראשי", callback_data='start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
