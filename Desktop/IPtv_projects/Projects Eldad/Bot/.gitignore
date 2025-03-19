@@ -1,1 +1,28 @@
+# Ignore Windows system files
+Application Data/
+Cookies/
+Local Settings/
+My Documents/
+NetHood/
+PrintHood/
+Recent/
+SendTo/
+Start Menu/
+Templates/
+Desktop.ini
+
+# Ignore database files
+*.db
+*.sqlite
+
+# Ignore compiled and log files
+*.log
+*.tmp
+*.cache
+*.lnk
+
+# Ignore IDE-specific files
+.idea/
+.vscode/
+
 "downloads.db" 
