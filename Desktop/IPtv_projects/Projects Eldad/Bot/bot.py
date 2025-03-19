@@ -8,12 +8,12 @@ from datetime import datetime
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from zipfile import ZipFile, ZIP_DEFLATED
-from threading import Lock  # מנעול למניעת כפילות בהורדה
+from threading import Lock
 import shutil
 import tempfile
 import pandas as pd
 
-# Global database connection (persistent for better performance)
+# Global database connection
 DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 
 TOKEN = '7757317671:AAHlq8yWLzP4mrgEovVoVZb_2j9ilWt0OlQ'
@@ -26,11 +26,8 @@ download_lock = Lock()
 DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 
 def create_database():
-    """Creates database tables if they do not exist."""
     c = DB_CONN.cursor()
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS files (
+    c.execute('''CREATE TABLE IF NOT EXISTS files (
             file_id TEXT PRIMARY KEY,
             file_name TEXT,
             uploader_id INTEGER,
@@ -38,22 +35,15 @@ def create_database():
             first_name TEXT,
             last_name TEXT,
             category TEXT,
-            upload_time TEXT
-        )
-    ''')
-
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS downloads (
+            upload_time TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS downloads (
             download_id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_name TEXT,
             downloader_id INTEGER,
             username TEXT,
             first_name TEXT,
             last_name TEXT,
-            download_time TEXT
-        )
-    ''')
-
+            download_time TEXT)''')
     DB_CONN.commit()
 
 
@@ -69,12 +59,9 @@ def create_secure_zip(file_paths, output_zip_path, password):
         print(f"שגיאה ביצירת קובץ ה-ZIP: {str(e)}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """תפריט ראשי."""
-    keyboard = [
-        [InlineKeyboardButton("📤 העלאת קובץ", callback_data='upload')],
-        [InlineKeyboardButton("📥 הורדת קבצים", callback_data='download')],
-        [InlineKeyboardButton("📊 הצגת דוחות", callback_data='reports')]  # כפתור חדש לדוחות
-    ]
+    keyboard = [[InlineKeyboardButton("📤 העלאת קובץ", callback_data='upload')],
+                [InlineKeyboardButton("📥 הורדת קבצים", callback_data='download')],
+                [InlineKeyboardButton("📊 הצגת דוחות", callback_data='reports')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.message:
         await update.message.reply_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
@@ -82,49 +69,43 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.edit_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
 
 async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מבקש מהמשתמש לשלוח קובץ להעלאה."""
     await update.callback_query.answer()
-    await update.callback_query.message.edit_text("אנא שלח את הקובץ להעלאה.")
-
-async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles file uploads and saves them efficiently."""
-    user = update.callback_query.from_user
-    file = update.message.document
-    file_name = file.file_name
-    upload_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-    # Determine category based on file type
-    category = 'פלייליסטים' if file_name.endswith(('.m3u', '.m3u8')) else 'אפליקציות' if file_name.endswith(
-        '.apk') else 'אחר'
-
-    os.makedirs(f'uploads/{category}', exist_ok=True)
-    file_path = f'uploads/{category}/{file_name}'
-
-    new_file = await context.bot.get_file(file.file_id)
-
-    # ✅ Corrected: Download file properly
-    await new_file.download_to_drive(file_path)
-
-    # Use the optimized global database connection
-    c = DB_CONN.cursor()
-    c.execute('''
-        INSERT OR REPLACE INTO files (file_id, file_name, uploader_id, username, first_name, last_name, category, upload_time)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (file.file_id, file_name, user.id, user.username or "לא זמין", user.first_name, user.last_name or "לא זמין",
-          category, upload_time))
-    DB_CONN.commit()
-
-    await update.message.reply_text("✅ הקובץ הועלה בהצלחה.")
+    await update.callback_query.message.edit_text("🔼 שלח את הקובץ להעלאה.")
 
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """תפריט הורדות עם קטגוריות."""
     await update.callback_query.answer()
     keyboard = [
         [InlineKeyboardButton("🎵 פלייליסטים", callback_data='category_playlists')],
         [InlineKeyboardButton("📲 אפליקציות", callback_data='category_apps')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.message.edit_text("בחר קטגוריה להורדה:", reply_markup=reply_markup)
+    await update.callback_query.message.edit_text("📥 בחר קטגוריה להורדה:", reply_markup=reply_markup)
+
+async def download_zip_playlists(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await download_zip_callback(update, context, "פלייליסטים")
+
+async def download_zip_apps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await download_zip_callback(update, context, "אפליקציות")
+
+
+async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.message.from_user
+    file = update.message.document
+    file_name = file.file_name
+    upload_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    category = 'Playlists' if file_name.endswith(('.m3u', '.m3u8')) else 'Apps' if file_name.endswith('.apk') else 'Other'
+    os.makedirs(f'uploads/{category}', exist_ok=True)
+    file_path = f'uploads/{category}/{file_name}'
+    new_file = await context.bot.get_file(file.file_id)
+    await new_file.download_to_drive(file_path)
+    c = DB_CONN.cursor()
+    c.execute('''INSERT OR REPLACE INTO files (file_id, file_name, uploader_id, username, first_name, last_name, category, upload_time)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+              (file.file_id, file_name, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A", category, upload_time))
+    DB_CONN.commit()
+    await update.message.reply_text("✅ הקובץ הועלה בהצלחה.")
+
+
 
 async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, category: str):
     """יוצר ZIP מוגן בסיסמה ושולח למשתמש."""
@@ -204,8 +185,6 @@ async def uploaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.callback_query.message.edit_text(response[:4000], parse_mode="Markdown")  # מגבלת טלגרם
 
-
-
 async def download_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """מציג לוג הורדות מסודר."""
     user = update.callback_query.from_user  # תיקון
@@ -243,12 +222,18 @@ async def main():
     app.add_handler(CommandHandler("generate_reports", generate_reports))
     app.add_handler(CommandHandler("stats_summary", stats_summary))
 
+
+
     # CallbackQueryHandlers לתפריט הדוחות
     app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
     app.add_handler(CallbackQueryHandler(uploaded_files, pattern='uploaded_files'))
     app.add_handler(CallbackQueryHandler(download_logs, pattern='download_logs'))
     app.add_handler(CallbackQueryHandler(generate_reports, pattern='generate_reports'))
     app.add_handler(CallbackQueryHandler(stats_summary, pattern='stats_summary'))
+    app.add_handler(CallbackQueryHandler(upload_callback, pattern='upload'))
+    app.add_handler(CallbackQueryHandler(download_callback, pattern='download'))
+    app.add_handler(CallbackQueryHandler(download_zip_playlists, pattern='category_playlists'))
+    app.add_handler(CallbackQueryHandler(download_zip_apps, pattern='category_apps'))
 
     # חיבור לפונקציות שמייצרות גרפים
     app.add_handler(CallbackQueryHandler(plot_top_uploaders, pattern='plot_top_uploaders'))
@@ -380,9 +365,7 @@ async def stats_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.message.edit_text(summary, parse_mode='Markdown')
 
 async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """תפריט כפתורים להצגת דוחות"""
     await update.callback_query.answer()
-
     keyboard = [
         [InlineKeyboardButton("📁 קבצים שהועלו", callback_data='uploaded_files')],
         [InlineKeyboardButton("📥 לוג הורדות", callback_data='download_logs')],
@@ -392,9 +375,8 @@ async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 סיכום סטטיסטיקות", callback_data='stats_summary')],
         [InlineKeyboardButton("⬅️ חזרה לתפריט הראשי", callback_data='start')]
     ]
-
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.callback_query.message.edit_text("בחר דוח להצגה:", reply_markup=reply_markup)
+    await update.callback_query.message.edit_text("📊 בחר דוח להצגה:", reply_markup=reply_markup)
 
 
 if __name__ == '__main__':
