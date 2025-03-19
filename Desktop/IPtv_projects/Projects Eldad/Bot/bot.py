@@ -25,21 +25,42 @@ download_lock = Lock()
 # Global database connection
 DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 
+
 def create_database():
     c = DB_CONN.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS downloads_group (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    # existing tables
+    c.execute('''CREATE TABLE IF NOT EXISTS files (
+            file_id TEXT PRIMARY KEY,
+            file_name TEXT,
+            uploader_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            category TEXT,
+            upload_time TEXT)''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS downloads (
+            download_id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_name TEXT,
             downloader_id INTEGER,
             username TEXT,
             first_name TEXT,
             last_name TEXT,
-            chat_id INTEGER,
-            topic_name TEXT,
-            download_time TEXT
-        )
-    ''')
+            download_time TEXT)''')
+
+    # ADD THIS TABLE BELOW TO FIX YOUR ISSUE
+    c.execute('''CREATE TABLE IF NOT EXISTS file_interactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT,
+            user_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            interaction_time TEXT
+        )''')
+
+    # commit changes
     DB_CONN.commit()
 
 
