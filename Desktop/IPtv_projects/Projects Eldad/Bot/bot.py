@@ -14,6 +14,7 @@ import pandas as pd
 import pyzipper
 import random
 import string
+from datetime import timedelta
 
 # Global database connection
 DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
@@ -70,8 +71,21 @@ def create_database():
             topic_name TEXT,
             download_time TEXT)''')
 
-    DB_CONN.commit()
+    c.execute('''CREATE TABLE IF NOT EXISTS group_file_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT,
+            file_type TEXT,
+            user_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            event_type TEXT,  -- "download" או "view"
+            chat_id INTEGER,
+            topic_name TEXT,
+            event_time TEXT
+        )''')
 
+    DB_CONN.commit()
 
 def generate_user_password(length=8):
     """יוצר סיסמה אקראית באורך נתון."""
@@ -219,6 +233,11 @@ async def send_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             document=file,
             caption=f'📥 הנה הקובץ שלך: {os.path.basename(file_path)}'
         )
+    c.execute('''
+        INSERT INTO downloads (file_name, downloader_id, username, first_name, last_name, download_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (os.path.basename(file_path), user.id, user.username or "N/A", user.first_name, user.last_name or "N/A",
+          interaction_time))
 
 
 async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,6 +272,50 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     update_excel()  # ⬅️ Automatically updates Excel after each file upload
     await update.message.reply_text("✅ הקובץ הועלה בהצלחה.")
+
+
+async def monitor_group_file_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    if not message or not message.document:
+        return
+
+    if message.chat_id != GROUP_ID:
+        return
+
+    file_name = message.document.file_name
+    file_type = os.path.splitext(file_name)[-1].lower()
+    user = message.from_user
+    event_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # ניסיון לזיהוי נושא השיחה בקבוצה (thread)
+    topic_name = "לא זמין"
+    if message.is_topic_message and message.message_thread_id:
+        topic = await context.bot.get_forum_topic(
+            chat_id=message.chat_id,
+            message_thread_id=message.message_thread_id
+        )
+        topic_name = topic.name
+
+    # הכנסה למסד הנתונים
+    c = DB_CONN.cursor()
+    c.execute('''
+        INSERT INTO group_file_events (
+            file_name, file_type, user_id, username, first_name, last_name,
+            event_type, chat_id, topic_name, event_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        file_name,
+        file_type,
+        user.id,
+        user.username or "N/A",
+        user.first_name,
+        user.last_name or "N/A",
+        "download",  # או "view" אם תתמוך בזיהוי עתידי
+        message.chat_id,
+        topic_name,
+        event_time
+    ))
+    DB_CONN.commit()
 
 
 
@@ -401,12 +464,14 @@ async def main():
     app.add_handler(CommandHandler("download_logs", download_logs))
     app.add_handler(CommandHandler("generate_reports", generate_reports))
     app.add_handler(CommandHandler("stats_summary", stats_summary))
+    app.add_handler(CommandHandler("group_stats", group_stats))
 
     # <-- ADD YOUR NEW HANDLER HERE!
     app.add_handler(CommandHandler("getid", show_group_id))
 
     # existing callback handlers and other handlers
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
+    app.add_handler(MessageHandler(filters.Document.ALL, monitor_group_file_events))
 
     # CallbackQueryHandlers לתפריט הדוחות
     app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
@@ -422,6 +487,11 @@ async def main():
     app.add_handler(CallbackQueryHandler(download_users_list, pattern='download_users_list'))
     app.add_handler(CallbackQueryHandler(download_zip_by_category_secure, pattern='category_playlists'))
     app.add_handler(CallbackQueryHandler(download_zip_by_category_secure, pattern='category_apps'))
+    app.add_handler(CallbackQueryHandler(group_file_events_report, pattern='group_file_events_report'))
+    app.add_handler(CallbackQueryHandler(group_file_events_filter, pattern='group_file_events_filter'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 2), pattern='filter_days_2'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 7), pattern='filter_days_7'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 30), pattern='filter_days_30'))
 
     # חיבור לפונקציות שמייצרות גרפים
     app.add_handler(CallbackQueryHandler(plot_top_uploaders, pattern='plot_top_uploaders'))
@@ -516,6 +586,35 @@ async def playlist_download_report(update: Update, context: ContextTypes.DEFAULT
     )
 
 
+async def group_file_events_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.callback_query.from_user
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
+        return
+
+    conn = sqlite3.connect('downloads.db')
+    df = pd.read_sql_query('''
+        SELECT file_name AS "שם קובץ", file_type AS "סוג קובץ", username AS "שם משתמש",
+               first_name AS "שם פרטי", last_name AS "שם משפחה",
+               event_type AS "סוג פעולה", topic_name AS "נושא", event_time AS "זמן"
+        FROM group_file_events
+        WHERE chat_id = ?
+        ORDER BY event_time DESC
+    ''', conn, params=(GROUP_ID,))
+    conn.close()
+
+    if df.empty:
+        await update.callback_query.message.edit_text("אין נתונים מהקבוצה.")
+        return
+
+    file_path = "group_file_events.xlsx"
+    df.to_excel(file_path, index=False)
+
+    with open(file_path, 'rb') as file:
+        await update.callback_query.message.reply_document(
+            document=file,
+            caption="📊 דוח פעולות קבצים בקבוצה"
+        )
 
 
 async def plot_top_uploaders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -657,6 +756,84 @@ async def group_download_report(update: Update, context: ContextTypes.DEFAULT_TY
         caption="📥 דוח מפורט: מי הוריד, מה הוריד, מתי והיכן"
     )
 
+async def group_file_events_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    keyboard = [
+        [InlineKeyboardButton("📆 יומיים אחרונים", callback_data='filter_days_2')],
+        [InlineKeyboardButton("🗓️ 7 ימים אחרונים", callback_data='filter_days_7')],
+        [InlineKeyboardButton("📅 חודש אחרון", callback_data='filter_days_30')],
+        [InlineKeyboardButton("⬅️ חזרה לתפריט הדוחות", callback_data='reports')]
+    ]
+    await update.callback_query.message.edit_text("בחר טווח תאריכים לדוח:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def group_file_events_filtered(update: Update, context: ContextTypes.DEFAULT_TYPE, days_back: int):
+    user = update.callback_query.from_user
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
+        return
+
+    since = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d %H:%M:%S')
+
+    conn = sqlite3.connect('downloads.db')
+    df = pd.read_sql_query('''
+        SELECT file_name AS "שם קובץ", file_type AS "סוג קובץ", username AS "שם משתמש",
+               first_name AS "שם פרטי", last_name AS "שם משפחה",
+               event_type AS "סוג פעולה", topic_name AS "נושא", event_time AS "זמן"
+        FROM group_file_events
+        WHERE chat_id = ? AND event_time >= ?
+        ORDER BY event_time DESC
+    ''', conn, params=(GROUP_ID, since))
+    conn.close()
+
+    if df.empty:
+        await update.callback_query.message.edit_text("📭 אין נתונים בטווח שבחרת.")
+        return
+
+    file_path = f"group_file_events_last_{days_back}_days.xlsx"
+    df.to_excel(file_path, index=False)
+
+    with open(file_path, 'rb') as f:
+        await update.callback_query.message.reply_document(
+            document=f,
+            caption=f"📊 דוח פעולות קבצים בקבוצה ({days_back} ימים אחרונים)"
+        )
+
+async def group_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != 7773889743:
+        await update.message.reply_text("אין לך הרשאה לצפות במידע זה.")
+        return
+
+    conn = sqlite3.connect('downloads.db')
+    df = pd.read_sql_query('''
+        SELECT file_name, user_id, username, event_type, event_time
+        FROM group_file_events
+        WHERE chat_id = ?
+    ''', conn, params=(GROUP_ID,))
+    conn.close()
+
+    if df.empty:
+        await update.message.reply_text("אין פעולות בקבוצה עד כה.")
+        return
+
+    total_actions = len(df)
+    unique_users = df['user_id'].nunique()
+    top_file = df['file_name'].value_counts().idxmax()
+    top_user_id = df['user_id'].value_counts().idxmax()
+    top_user_name = df[df['user_id'] == top_user_id]['username'].iloc[0]
+
+    summary = (
+        f"📊 **סטטיסטיקת קבוצה - סיכום כללי**\n"
+        f"🔢 פעולות בסה\"כ: {total_actions}\n"
+        f"👥 משתמשים שונים: {unique_users}\n"
+        f"🔥 קובץ פופולרי: `{top_file}`\n"
+        f"🏆 משתמש פעיל ביותר: @{top_user_name} ({top_user_id})"
+    )
+
+    await update.message.reply_text(summary, parse_mode="Markdown")
+
+
 async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     keyboard = [
@@ -667,6 +844,8 @@ async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📑 יצירת דוחות מלאים", callback_data='generate_reports')],
         [InlineKeyboardButton("📊 סיכום סטטיסטיקות", callback_data='stats_summary')],
         [InlineKeyboardButton("👤 רשימת משתמשים שהורידו קבצים", callback_data='download_users_list')],
+        [InlineKeyboardButton("📊 דוח קבצים מהקבוצה", callback_data='group_file_events_report')],
+        [InlineKeyboardButton("📅 דוח לפי תאריכים", callback_data='group_file_events_filter')],
         [InlineKeyboardButton("⬅️ חזרה לתפריט הראשי", callback_data='start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
