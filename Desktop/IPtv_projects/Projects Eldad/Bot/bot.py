@@ -15,6 +15,17 @@ import pyzipper
 import random
 import string
 from datetime import timedelta
+import logging
+
+logging.basicConfig(
+    filename='errors.log',
+    level=logging.ERROR,
+    format='[%(asctime)s] %(levelname)s: %(message)s'
+)
+
+def log_error(error, context=""):
+    logging.error(f"{context}: {str(error)}")
+
 
 # Global database connection
 DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
@@ -32,60 +43,101 @@ DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 def create_database():
     c = DB_CONN.cursor()
 
+    # טבלת קבצים שהועלו
     c.execute('''CREATE TABLE IF NOT EXISTS files (
-            file_id TEXT PRIMARY KEY,
-            file_name TEXT,
-            uploader_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            category TEXT,
-            upload_time TEXT)''')
+        file_id TEXT PRIMARY KEY,
+        file_name TEXT,
+        uploader_id INTEGER,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        category TEXT,
+        upload_time TEXT
+    )''')
 
+    # טבלת הורדות מורחבת (מאוחדת)
     c.execute('''CREATE TABLE IF NOT EXISTS downloads (
-            download_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_name TEXT,
-            downloader_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            download_time TEXT)''')
+        download_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT,
+        downloader_id INTEGER,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        download_time TEXT,
+        source TEXT,           -- bot / group
+        chat_id INTEGER,       -- קבוצת מקור
+        topic_name TEXT,       -- נושא
+        device_type TEXT,      -- mobile, desktop, web
+        platform TEXT,         -- Android, iOS, Windows וכו’
+        version TEXT,          -- גרסת קובץ (אם רלוונטי)
+        notes TEXT,            -- הערות חופשיות
+        file_size INTEGER      -- גודל קובץ בבייטים
+    )''')
 
+    # טבלת אינטראקציות
     c.execute('''CREATE TABLE IF NOT EXISTS file_interactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_name TEXT,
-            user_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            interaction_time TEXT)''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT,
+        user_id INTEGER,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        interaction_time TEXT
+    )''')
 
-    c.execute('''CREATE TABLE IF NOT EXISTS downloads_group (
-            download_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_name TEXT,
-            downloader_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            chat_id INTEGER,
-            topic_name TEXT,
-            download_time TEXT)''')
-
+    # לוג הורדות וצפיות מהקבוצה
     c.execute('''CREATE TABLE IF NOT EXISTS group_file_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_name TEXT,
-            file_type TEXT,
-            user_id INTEGER,
-            username TEXT,
-            first_name TEXT,
-            last_name TEXT,
-            event_type TEXT,  -- "download" או "view"
-            chat_id INTEGER,
-            topic_name TEXT,
-            event_time TEXT
-        )''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_name TEXT,
+        file_type TEXT,
+        user_id INTEGER,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        event_type TEXT,  -- "download" או "view"
+        chat_id INTEGER,
+        topic_name TEXT,
+        event_time TEXT
+    )''')
+
+    def check_downloads_exist():
+        conn = sqlite3.connect('downloads.db')
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM downloads")
+        count = c.fetchone()[0]
+        conn.close()
+        print(f"✅ כמות נתונים בטבלה downloads: {count}")
+
+    # גיבוי ומחיקת downloads_group
+    try:
+        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='downloads_group'")
+        if c.fetchone():
+            print("📋 מבצע גיבוי של טבלת downloads_group...")
+
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS downloads_group_backup AS
+                SELECT * FROM downloads_group
+            ''')
+
+            # ממפה את השדות הקיימים לשדות החדשים
+            c.execute('''
+                INSERT INTO downloads (
+                    file_name, downloader_id, username, first_name, last_name,
+                    download_time, source, chat_id, topic_name
+                )
+                SELECT file_name, downloader_id, username, first_name, last_name,
+                       download_time, 'group', chat_id, topic_name
+                FROM downloads_group
+            ''')
+
+            c.execute("DROP TABLE downloads_group")
+            print("✅ טבלת downloads_group גובתה ונמחקה בהצלחה.")
+
+    except Exception as e:
+        log_error(e, "גיבוי ומחיקת downloads_group")
 
     DB_CONN.commit()
+
 
 def generate_user_password(length=8):
     """יוצר סיסמה אקראית באורך נתון."""
@@ -172,6 +224,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 GROUP_ID = -1002464592389  # Replace with your group's actual
 TOPIC_NAME = "פלייליסטים"   # Your actual topic name
+ADMIN_ID = 7773889743
 
 async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bans users from joining the group if they don't have a username (@handle)."""
@@ -187,30 +240,46 @@ async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def track_group_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Track file downloads specifically from a group under 'playlists' topic."""
-    message = update.message
+    """רושם הורדות מקבוצת טלגרם לטבלת downloads המאוחדת"""
+    try:
+        message = update.message
 
-    if message.chat_id != GROUP_ID or (message.message_thread_id is None):
-        return  # Ignore messages not from the specific group/topic
+        if message.chat_id != GROUP_ID or (message.message_thread_id is None):
+            return
 
-    topic = await context.bot.get_forum_topic(chat_id=message.chat_id, message_thread_id=message.message_thread_id)
-    if topic.name.lower() != TOPIC_NAME.lower():
-        return  # Only proceed if the topic matches exactly 'playlists'
+        topic = await context.bot.get_forum_topic(chat_id=message.chat_id, message_thread_id=message.message_thread_id)
+        if topic.name.lower() != TOPIC_NAME.lower():
+            return
 
-    if message.document:
-        file_name = message.document.file_name
-        user = message.from_user
-        download_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        if message.document:
+            file_name = message.document.file_name
+            file_size = message.document.file_size or 0  # 🆕
+            user = message.from_user
+            download_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        # Insert download details into the database
-        c = DB_CONN.cursor()
-        c.execute('''
-            INSERT INTO downloads_group (
-                file_name, downloader_id, username, first_name, last_name, chat_id, topic_name, download_time
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (file_name, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A",
-              message.chat_id, topic.name, download_time))
-        DB_CONN.commit()
+            # ערכים משוערים (אין לנו מזה באופן מדויק)
+            device_type = "mobile"  # ברירת מחדל
+            platform = "Telegram"
+            version = None
+            notes = "group auto-download"
+
+            c = DB_CONN.cursor()
+            c.execute('''
+                INSERT INTO downloads (
+                    file_name, downloader_id, username, first_name, last_name,
+                    download_time, source, chat_id, topic_name,
+                    device_type, platform, version, notes, file_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                file_name, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A",
+                download_time, "group", message.chat_id, topic.name,
+                device_type, platform, version, notes, file_size
+            ))
+            DB_CONN.commit()
+
+    except Exception as e:
+        log_error(e, "track_group_download")
+
 
 async def send_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_path = 'uploads/פלייליסטים/EG(Israel)17.3.25.m3u'
@@ -239,10 +308,13 @@ async def send_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ''', (os.path.basename(file_path), user.id, user.username or "N/A", user.first_name, user.last_name or "N/A",
           interaction_time))
 
+    DB_CONN.commit()  # ⬅️ הוספנו את זה
+
 
 async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     await update.callback_query.message.edit_text("🔼 שלח את הקובץ להעלאה.")
+
 
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -320,7 +392,7 @@ async def monitor_group_file_events(update: Update, context: ContextTypes.DEFAUL
 
 
 async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TYPE, category: str):
-    """יוצר ZIP מוגן בסיסמה ושולח למשתמש."""
+    """יוצר ZIP מוגן בסיסמה ושולח למשתמש, כולל תיעוד מלא"""
     if not download_lock.acquire(blocking=False):
         await update.callback_query.answer("ההורדה כבר מתבצעת, נסה שוב בעוד רגע.")
         return
@@ -344,33 +416,49 @@ async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TY
         temp_dir = tempfile.mkdtemp()
         temp_zip_path = os.path.join(temp_dir, f"{category}.zip")
 
-        with ZipFile(temp_zip_path, 'w', ZIP_DEFLATED) as zipf:
-            zipf.setpassword(PASSWORD.encode('utf-8'))  # סיסמה להגנה לפתיחת הקובץ
+        # יצירת קובץ ZIP עם סיסמה
+        with pyzipper.AESZipFile(temp_zip_path, 'w', compression=ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zipf:
+            zipf.setpassword(PASSWORD.encode('utf-8'))
             for file_path in file_paths:
                 zipf.write(file_path, os.path.basename(file_path))
-
 
         shutil.move(temp_zip_path, zip_path)
         shutil.rmtree(temp_dir)
 
-        conn = sqlite3.connect('downloads.db')
-        c = conn.cursor()
+        # 🧮 מידע נוסף לתיעוד
+        file_size = os.path.getsize(zip_path)
+        device_type = "mobile"
+        platform = "Telegram"
+        version = None
+        notes = f"{category} zip"
+
+        # רישום למסד הנתונים
+        c = DB_CONN.cursor()
         c.execute('''
-            INSERT INTO downloads (file_name, downloader_id, username, first_name, last_name, download_time)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (f"{category}.zip", user.id, user.username or "לא זמין", user.first_name, user.last_name or "לא זמין", download_time))
-        conn.commit()
-        conn.close()
+            INSERT INTO downloads (
+                file_name, downloader_id, username, first_name, last_name, download_time,
+                source, chat_id, topic_name, device_type, platform, version, notes, file_size
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            f"{category}.zip", user.id, user.username or "N/A", user.first_name, user.last_name or "N/A",
+            download_time, "bot", None, None,  # no group or topic
+            device_type, platform, version, notes, file_size
+        ))
+        DB_CONN.commit()
 
         await update.callback_query.answer()
         await update.callback_query.message.reply_document(
             document=open(zip_path, 'rb'),
-            caption=f'להורדת הקובץ השתמש בסיסמה: {PASSWORD}',
+            caption=f'📦 הורדה מוכנה. הסיסמה לפתיחה: {PASSWORD}',
             filename=f"{category}.zip"
         )
 
+    except Exception as e:
+        log_error(e, "download_zip_callback")
+
     finally:
         download_lock.release()
+
 
 async def uploaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """מציג רשימה מסודרת של הקבצים שהועלו (Excel עם פילטרים)."""
@@ -395,6 +483,36 @@ async def uploaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         document=open(output_file, 'rb'),
         caption="📂 רשימת קבצים שהועלו (Excel מפורט עם אפשרות פילטר וסינון)"
     )
+
+def print_downloads_columns():
+    conn = sqlite3.connect('downloads.db')
+    c = conn.cursor()
+    c.execute("PRAGMA table_info(downloads)")
+    rows = c.fetchall()
+    conn.close()
+    print("🧾 שדות בטבלת downloads:")
+    for row in rows:
+        print(f"- {row[1]}")
+
+def insert_test_download():
+    conn = sqlite3.connect('downloads.db')
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO downloads (
+            file_name, downloader_id, username, first_name, last_name,
+            download_time, source, chat_id, topic_name,
+            device_type, platform, version, notes, file_size
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        "test_file.zip", 123456, "tester", "Test", "User",
+        datetime.now().strftime('%Y-%m-%d %H:%M:%S'), "bot", None, None,
+        "desktop", "Windows", "1.0", "debug", 12345
+    ))
+    conn.commit()
+    conn.close()
+    print("🧪 שורת בדיקה הוזנה לטבלה downloads.")
+
 def update_excel():
     conn = sqlite3.connect('downloads.db')
     df = pd.read_sql_query(
@@ -408,28 +526,53 @@ def update_excel():
 
 
 async def download_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מציג לוג הורדות מסודר."""
-    user = update.callback_query.from_user  # תיקון
+    """יוצר קובץ Excel עם כל ההורדות"""
+    user = update.callback_query.from_user
 
-    if user.id != 7773889743:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
+    if user.id != ADMIN_ID:
+        await update.callback_query.answer("אין לך הרשאה לצפות בלוג זה.", show_alert=True)
         return
 
     conn = sqlite3.connect('downloads.db')
-    c = conn.cursor()
-    c.execute('SELECT file_name, username, downloader_id, download_time FROM downloads')
-    downloads = c.fetchall()
+    df = pd.read_sql_query('''
+        SELECT
+            downloader_id AS "מזהה משתמש",
+            username AS "שם משתמש",
+            first_name AS "שם פרטי",
+            last_name AS "שם משפחה",
+            file_name AS "שם קובץ",
+            download_time AS "תאריך הורדה",
+            platform AS "פלטפורמה",
+            device_type AS "סוג מכשיר",
+            notes AS "הערות",
+            source AS "מקור"
+        FROM downloads
+        ORDER BY download_time DESC
+        LIMIT 100
+    ''', conn)
     conn.close()
 
-    if not downloads:
-        await update.callback_query.message.edit_text("📥 אין הורדות זמינות.")
+    if df.empty:
+        await update.callback_query.message.edit_text("📥 אין נתונים להצגה בלוג.")
         return
 
-    response = "**📥 לוג הורדות:**\n"
-    for log in downloads:
-        response += f"📄 {log[0]} | 👤 {log[1]} | 🆔 {log[2]} | 📅 {log[3]}\n"
+    output_file = "download_logs.xlsx"
+    df.to_excel(output_file, index=False)
 
-    await update.callback_query.message.edit_text(response[:4000], parse_mode="Markdown")
+    await update.callback_query.message.reply_document(
+        document=open(output_file, 'rb'),
+        caption="📥 לוג הורדות אחרונות (Excel)"
+    )
+
+
+
+
+def test_download_count():
+    conn = sqlite3.connect('downloads.db')
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM downloads")
+    print("סה\"כ הורדות:", c.fetchone()[0])
+    conn.close()
 
 
 async def show_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -472,6 +615,7 @@ async def main():
     # existing callback handlers and other handlers
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
     app.add_handler(MessageHandler(filters.Document.ALL, monitor_group_file_events))
+    app.add_handler(MessageHandler(filters.Document.ALL, track_group_download))
 
     # CallbackQueryHandlers לתפריט הדוחות
     app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
@@ -492,6 +636,7 @@ async def main():
     app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 2), pattern='filter_days_2'))
     app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 7), pattern='filter_days_7'))
     app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 30), pattern='filter_days_30'))
+    app.add_handler(CallbackQueryHandler(platform_summary_report, pattern='platform_summary_report'))
 
     # חיבור לפונקציות שמייצרות גרפים
     app.add_handler(CallbackQueryHandler(plot_top_uploaders, pattern='plot_top_uploaders'))
@@ -833,6 +978,57 @@ async def group_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(summary, parse_mode="Markdown")
 
+async def platform_summary_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.callback_query.from_user
+
+    if user.id != ADMIN_ID:
+        await update.callback_query.answer("אין לך הרשאה לצפות בדוח זה.", show_alert=True)
+        return
+
+    conn = sqlite3.connect('downloads.db')
+    df = pd.read_sql_query('SELECT * FROM downloads', conn)
+    conn.close()
+
+    if df.empty:
+        await update.callback_query.message.edit_text("📊 אין נתונים להצגה.")
+        return
+
+    summary = "**📊 סיכום לפי פלטפורמה / מכשיר:**\n\n"
+
+    if 'platform' in df.columns:
+        platform_counts = df['platform'].value_counts()
+        summary += "💻 **מערכות הפעלה:**\n"
+        for platform, count in platform_counts.items():
+            summary += f"• {platform}: {count}\n"
+        summary += "\n"
+
+    if 'device_type' in df.columns:
+        device_counts = df['device_type'].value_counts()
+        summary += "📱 **סוגי מכשירים:**\n"
+        for device, count in device_counts.items():
+            summary += f"• {device}: {count}\n"
+        summary += "\n"
+
+    if 'notes' in df.columns:
+        notes_counts = df['notes'].value_counts()
+        summary += "🏷️ **הערות נפוצות:**\n"
+        for note, count in notes_counts.items():
+            summary += f"• {note}: {count}\n"
+        summary += "\n"
+
+    if 'source' in df.columns:
+        source_counts = df['source'].value_counts()
+        summary += "🔄 **מקור הורדה:**\n"
+        for source, count in source_counts.items():
+            summary += f"• {source}: {count}\n"
+        summary += "\n"
+
+    if 'file_size' in df.columns:
+        avg_size = df['file_size'].mean()
+        summary += f"📦 **גודל ממוצע של קובץ:** {int(avg_size):,} bytes\n"
+
+    await update.callback_query.message.edit_text(summary, parse_mode="Markdown")
+
 
 async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -846,6 +1042,7 @@ async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("👤 רשימת משתמשים שהורידו קבצים", callback_data='download_users_list')],
         [InlineKeyboardButton("📊 דוח קבצים מהקבוצה", callback_data='group_file_events_report')],
         [InlineKeyboardButton("📅 דוח לפי תאריכים", callback_data='group_file_events_filter')],
+        [InlineKeyboardButton("📊 סיכום לפי פלטפורמה / מכשיר", callback_data='platform_summary_report')],
         [InlineKeyboardButton("⬅️ חזרה לתפריט הראשי", callback_data='start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -855,37 +1052,43 @@ async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.callback_query.from_user
 
-    # בדיקת הרשאות למנהל בלבד (שנה לפי הצורך)
-    if user.id != 7773889743:
+    if user.id != ADMIN_ID:
         await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
         return
 
     conn = sqlite3.connect('downloads.db')
-    query = '''
-        SELECT downloader_id AS "מזהה משתמש",
-               username AS "שם משתמש",
-               first_name AS "שם פרטי",
-               last_name AS "שם משפחה",
-               file_name AS "שם קובץ",
-               download_time AS "זמן הורדה"
+    df = pd.read_sql_query('''
+        SELECT
+            downloader_id AS "מזהה משתמש",
+            username AS "שם משתמש",
+            first_name AS "שם פרטי",
+            last_name AS "שם משפחה",
+            file_name AS "שם קובץ",
+            download_time AS "זמן הורדה",
+            platform AS "מערכת הפעלה",
+            device_type AS "סוג מכשיר",
+            version AS "גרסה",
+            notes AS "הערות",
+            file_size AS "גודל (bytes)",
+            source AS "מקור",
+            topic_name AS "נושא",
+            chat_id AS "מזהה קבוצה"
         FROM downloads
         ORDER BY download_time DESC
-    '''
-    df = pd.read_sql_query(query, conn)
+    ''', conn)
     conn.close()
 
     if df.empty:
         await update.callback_query.message.edit_text("📥 אין נתונים של הורדות זמינים.")
         return
 
-    report_file = "all_users_downloads.xlsx"
-    df.to_excel(report_file, index=False)
+    output_file = "all_users_downloads.xlsx"
+    df.to_excel(output_file, index=False)
 
     await update.callback_query.message.reply_document(
-        document=open(report_file, 'rb'),
-        caption="📥 דוח מפורט: רשימת כל המשתמשים שהורידו קבצים"
+        document=open(output_file, 'rb'),
+        caption="📥 דוח: כל המשתמשים שהורידו קבצים"
     )
-
 
 
 if __name__ == '__main__':
