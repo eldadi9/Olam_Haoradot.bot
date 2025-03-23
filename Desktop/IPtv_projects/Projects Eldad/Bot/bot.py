@@ -173,7 +173,7 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file = update.message.document
     file_name = file.file_name
     upload_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    category = 'Playlists' if file_name.endswith(('.m3u', '.m3u8')) else 'Apps' if file_name.endswith('.apk') else 'Other'
+    category = 'פלייליסטים' if file_name.endswith(('.m3u', '.m3u8')) else 'אפליקציות' if file_name.endswith('.apk') else 'Other'
     os.makedirs(f'uploads/{category}', exist_ok=True)
     file_path = f'uploads/{category}/{file_name}'
     new_file = await context.bot.get_file(file.file_id)
