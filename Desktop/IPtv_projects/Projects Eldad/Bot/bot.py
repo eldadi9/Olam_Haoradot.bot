@@ -12,6 +12,7 @@ from threading import Lock
 import shutil
 import tempfile
 import pandas as pd
+import pyzipper
 
 # Global database connection
 DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
@@ -29,7 +30,6 @@ DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 def create_database():
     c = DB_CONN.cursor()
 
-    # existing tables
     c.execute('''CREATE TABLE IF NOT EXISTS files (
             file_id TEXT PRIMARY KEY,
             file_name TEXT,
@@ -49,7 +49,6 @@ def create_database():
             last_name TEXT,
             download_time TEXT)''')
 
-    # ADD THIS TABLE BELOW TO FIX YOUR ISSUE
     c.execute('''CREATE TABLE IF NOT EXISTS file_interactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_name TEXT,
@@ -57,23 +56,81 @@ def create_database():
             username TEXT,
             first_name TEXT,
             last_name TEXT,
-            interaction_time TEXT
-        )''')
+            interaction_time TEXT)''')
 
-    # commit changes
+    c.execute('''CREATE TABLE IF NOT EXISTS downloads_group (
+            download_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT,
+            downloader_id INTEGER,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            chat_id INTEGER,
+            topic_name TEXT,
+            download_time TEXT)''')
+
     DB_CONN.commit()
 
 
-def create_secure_zip(file_paths, output_zip_path, password):
-    """יוצר קובץ ZIP מוגן בסיסמה."""
+async def download_zip_by_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """יוצר ZIP מוצפן עם סיסמה לפי הקטגוריה שנבחרה (פלייליסטים או אפליקציות)."""
+    query = update.callback_query
+    await query.answer()
+
+    category = "פלייליסטים" if query.data == "category_playlists" else "אפליקציות"
+    user = query.from_user
+    download_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    # קבצים בתיקייה שנבחרה
+    file_paths = [
+        os.path.join(root, file)
+        for root, _, files in os.walk(f'uploads/{category}')
+        for file in files
+    ]
+
+    if not file_paths:
+        await query.message.edit_text("❌ אין קבצים זמינים בקטגוריה שנבחרה.")
+        return
+
+    zip_path = f"{category}.zip"
+    temp_dir = tempfile.mkdtemp()
+    temp_zip_path = os.path.join(temp_dir, zip_path)
+
     try:
-        with ZipFile(output_zip_path, 'w', ZIP_DEFLATED) as zipf:
-            zipf.setpassword(password.encode('utf-8'))
+        # יצירת קובץ ZIP מוצפן
+        with pyzipper.AESZipFile(temp_zip_path, 'w',
+                                 compression=pyzipper.ZIP_DEFLATED,
+                                 encryption=pyzipper.WZ_AES) as zf:
+            zf.setpassword(PASSWORD.encode('utf-8'))
             for file_path in file_paths:
-                zipf.write(file_path, os.path.basename(file_path))
-        print(f"קובץ ZIP נוצר בהצלחה: {output_zip_path}")
+                zf.write(file_path, os.path.basename(file_path))
+
+        shutil.move(temp_zip_path, zip_path)
+        shutil.rmtree(temp_dir)
+
+        # שמירת לוג במסד
+        c = DB_CONN.cursor()
+        c.execute('''
+            INSERT INTO downloads (file_name, downloader_id, username, first_name, last_name, download_time)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (zip_path, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A", download_time))
+        DB_CONN.commit()
+
+        with open(zip_path, 'rb') as file:
+            await query.message.reply_document(
+                document=file,
+                filename=zip_path,
+                caption=f"📦 הקובץ שלך מוכן.\n🔐 סיסמה לפתיחה: `{PASSWORD}`",
+                parse_mode="Markdown"
+            )
+
     except Exception as e:
-        print(f"שגיאה ביצירת קובץ ה-ZIP: {str(e)}")
+        await query.message.edit_text(f"שגיאה ביצירת קובץ: {str(e)}")
+
+    finally:
+        download_lock.release()
+
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("📤 העלאת קובץ", callback_data='upload')],
@@ -85,7 +142,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.callback_query.message.edit_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
 
-GROUP_ID = -1087968824  # Replace with your group's actual
+GROUP_ID = -1002464592389  # Replace with your group's actual
 TOPIC_NAME = "פלייליסטים"   # Your actual topic name
 
 async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -100,8 +157,6 @@ async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await context.bot.ban_chat_member(update.message.chat_id, member.id)  # Ban user permanently
 
-GROUP_ID = -1087968824  # replace with your actual group ID
-TOPIC_NAME = "פלייליסטים"  # replace with your actual topic name if different
 
 async def track_group_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Track file downloads specifically from a group under 'playlists' topic."""
@@ -130,23 +185,27 @@ async def track_group_download(update: Update, context: ContextTypes.DEFAULT_TYP
         DB_CONN.commit()
 
 async def send_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    file_path = 'uploads/פלייליסטים/EG(Israel)17.3.25.m3u'  # Example file path
+    file_path = 'uploads/פלייליסטים/EG(Israel)17.3.25.m3u'
+    if not os.path.exists(file_path):
+        await update.callback_query.message.reply_text("הקובץ המבוקש לא נמצא.")
+        return
+
     user = update.callback_query.from_user
     interaction_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # Log interaction
     c = DB_CONN.cursor()
     c.execute('''
         INSERT INTO file_interactions (file_name, user_id, username, first_name, last_name, interaction_time)
         VALUES (?, ?, ?, ?, ?, ?)
-    ''', ('EG(Israel)17.3.25.m3u', user.id, user.username or "N/A", user.first_name, user.last_name or "N/A", interaction_time))
+    ''', (os.path.basename(file_path), user.id, user.username or "N/A", user.first_name, user.last_name or "N/A", interaction_time))
     DB_CONN.commit()
 
-    # Send file to user
-    await update.callback_query.message.reply_document(
-        document=open(file_path, 'rb'),
-        caption=f'📥 הנה הקובץ שלך: EG(Israel)17.3.25.m3u'
-    )
+    with open(file_path, 'rb') as file:
+        await update.callback_query.message.reply_document(
+            document=file,
+            caption=f'📥 הנה הקובץ שלך: {os.path.basename(file_path)}'
+        )
+
 
 async def upload_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -160,12 +219,6 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.message.edit_text("📥 בחר קטגוריה להורדה:", reply_markup=reply_markup)
-
-async def download_zip_playlists(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await download_zip_callback(update, context, "פלייליסטים")
-
-async def download_zip_apps(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await download_zip_callback(update, context, "אפליקציות")
 
 
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -302,6 +355,27 @@ async def download_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.message.edit_text(response[:4000], parse_mode="Markdown")
 
 
+async def show_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"Group ID: {update.message.chat_id}")
+
+
+async def generate_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """יוצר דוחות ויזואליים ושולח למשתמש."""
+    user = update.callback_query.from_user  # תיקון
+
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
+        return
+
+    # ✨ הוספת הודעה לפני יצירת הדוחות
+    await update.callback_query.message.edit_text("🔎 יצירת דוחות... נא להמתין.")
+
+    await plot_top_uploaders(update, context)
+    await plot_download_activity(update, context)
+
+    # ✨ לאחר השלמת הדוחות, עדכון המשתמש
+    await update.callback_query.message.edit_text("✅ דוחות נוצרו ונשלחו בהצלחה!")
+
 async def main():
     create_database()
 
@@ -313,8 +387,12 @@ async def main():
     app.add_handler(CommandHandler("download_logs", download_logs))
     app.add_handler(CommandHandler("generate_reports", generate_reports))
     app.add_handler(CommandHandler("stats_summary", stats_summary))
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
 
+    # <-- ADD YOUR NEW HANDLER HERE!
+    app.add_handler(CommandHandler("getid", show_group_id))
+
+    # existing callback handlers and other handlers
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
 
     # CallbackQueryHandlers לתפריט הדוחות
     app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
@@ -324,12 +402,12 @@ async def main():
     app.add_handler(CallbackQueryHandler(stats_summary, pattern='stats_summary'))
     app.add_handler(CallbackQueryHandler(upload_callback, pattern='upload'))
     app.add_handler(CallbackQueryHandler(download_callback, pattern='download'))
-    app.add_handler(CallbackQueryHandler(download_zip_playlists, pattern='category_playlists'))
-    app.add_handler(CallbackQueryHandler(download_zip_apps, pattern='category_apps'))
     app.add_handler(CallbackQueryHandler(group_download_summary, pattern='group_download_summary'))
     app.add_handler(CallbackQueryHandler(send_playlist, pattern='download_playlist'))
     app.add_handler(CallbackQueryHandler(playlist_download_report, pattern='playlist_download_report'))
-
+    app.add_handler(CallbackQueryHandler(download_users_list, pattern='download_users_list'))
+    app.add_handler(CallbackQueryHandler(download_zip_by_category, pattern='category_playlists'))
+    app.add_handler(CallbackQueryHandler(download_zip_by_category, pattern='category_apps'))
 
     # חיבור לפונקציות שמייצרות גרפים
     app.add_handler(CallbackQueryHandler(plot_top_uploaders, pattern='plot_top_uploaders'))
@@ -355,6 +433,7 @@ async def main():
     finally:
         await app.updater.stop()
         await app.shutdown()
+
 
 def load_data():
     """טוען נתונים מהמסד."""
@@ -422,22 +501,7 @@ async def playlist_download_report(update: Update, context: ContextTypes.DEFAULT
         caption="📥 דוח מפורט: מי הוריד את הקובץ EG(Israel)17.3.25.m3u"
     )
 
-async def generate_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """יוצר דוחות ויזואליים ושולח למשתמש."""
-    user = update.callback_query.from_user  # תיקון
 
-    if user.id != 7773889743:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
-        return
-
-    # ✨ הוספת הודעה לפני יצירת הדוחות
-    await update.callback_query.message.edit_text("🔎 יצירת דוחות... נא להמתין.")
-
-    await plot_top_uploaders(update, context)
-    await plot_download_activity(update, context)
-
-    # ✨ לאחר השלמת הדוחות, עדכון המשתמש
-    await update.callback_query.message.edit_text("✅ דוחות נוצרו ונשלחו בהצלחה!")
 
 
 async def plot_top_uploaders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -543,6 +607,41 @@ async def group_download_summary(update: Update, context: ContextTypes.DEFAULT_T
         caption=f"📥 דוח הורדות מפורט מקבוצתך בנושא '{TOPIC_NAME}'"
     )
 
+async def group_download_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.callback_query.from_user
+
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
+        return
+
+    conn = sqlite3.connect('downloads.db')
+    query = '''
+        SELECT downloader_id AS "מזהה משתמש",
+               username AS "שם משתמש",
+               first_name AS "שם פרטי",
+               last_name AS "שם משפחה",
+               file_name AS "שם הקובץ",
+               chat_id AS "מזהה קבוצה",
+               topic_name AS "נושא",
+               download_time AS "זמן ההורדה"
+        FROM downloads_group
+        ORDER BY download_time DESC
+    '''
+
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+
+    if df.empty:
+        await update.callback_query.message.edit_text("📥 אין נתונים של הורדות מהקבוצה.")
+        return
+
+    report_file = "group_download_report.xlsx"
+    df.to_excel(report_file, index=False)
+
+    await update.callback_query.message.reply_document(
+        document=open(report_file, 'rb'),
+        caption="📥 דוח מפורט: מי הוריד, מה הוריד, מתי והיכן"
+    )
 
 async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
@@ -554,12 +653,46 @@ async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📑 יצירת דוחות מלאים", callback_data='generate_reports')],
         [InlineKeyboardButton("📊 סיכום סטטיסטיקות", callback_data='stats_summary')],
         [InlineKeyboardButton("👤 רשימת משתמשים שהורידו קבצים", callback_data='download_users_list')],
-        [InlineKeyboardButton("📥 דוח הורדות פלייליסט", callback_data='playlist_download_report')],
-        [InlineKeyboardButton("📥 דוח הורדות בנושא 'פלייליסטים'", callback_data='group_download_summary')],
         [InlineKeyboardButton("⬅️ חזרה לתפריט הראשי", callback_data='start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.callback_query.message.edit_text("📊 בחר דוח להצגה:", reply_markup=reply_markup)
+
+
+async def download_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.callback_query.from_user
+
+    # בדיקת הרשאות למנהל בלבד (שנה לפי הצורך)
+    if user.id != 7773889743:
+        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
+        return
+
+    conn = sqlite3.connect('downloads.db')
+    query = '''
+        SELECT downloader_id AS "מזהה משתמש",
+               username AS "שם משתמש",
+               first_name AS "שם פרטי",
+               last_name AS "שם משפחה",
+               file_name AS "שם קובץ",
+               download_time AS "זמן הורדה"
+        FROM downloads
+        ORDER BY download_time DESC
+    '''
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+
+    if df.empty:
+        await update.callback_query.message.edit_text("📥 אין נתונים של הורדות זמינים.")
+        return
+
+    report_file = "all_users_downloads.xlsx"
+    df.to_excel(report_file, index=False)
+
+    await update.callback_query.message.reply_document(
+        document=open(report_file, 'rb'),
+        caption="📥 דוח מפורט: רשימת כל המשתמשים שהורידו קבצים"
+    )
+
 
 
 if __name__ == '__main__':
