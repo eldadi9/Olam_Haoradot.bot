@@ -1,7 +1,6 @@
 
 import os
 import sqlite3
-import zipfile
 import asyncio
 import platform
 from datetime import datetime
@@ -13,6 +12,8 @@ import shutil
 import tempfile
 import pandas as pd
 import pyzipper
+import random
+import string
 
 # Global database connection
 DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
@@ -72,8 +73,14 @@ def create_database():
     DB_CONN.commit()
 
 
-async def download_zip_by_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """יוצר ZIP מוצפן עם סיסמה לפי הקטגוריה שנבחרה (פלייליסטים או אפליקציות)."""
+def generate_user_password(length=8):
+    """יוצר סיסמה אקראית באורך נתון."""
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choice(chars) for _ in range(length))
+
+
+async def download_zip_by_category_secure(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """יוצר ZIP מוצפן עם סיסמה ייחודית לפי הקטגוריה שנבחרה (פלייליסטים או אפליקציות)."""
     query = update.callback_query
     await query.answer()
 
@@ -81,7 +88,7 @@ async def download_zip_by_category(update: Update, context: ContextTypes.DEFAULT
     user = query.from_user
     download_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # קבצים בתיקייה שנבחרה
+    # קבצים מהקטגוריה
     file_paths = [
         os.path.join(root, file)
         for root, _, files in os.walk(f'uploads/{category}')
@@ -92,23 +99,26 @@ async def download_zip_by_category(update: Update, context: ContextTypes.DEFAULT
         await query.message.edit_text("❌ אין קבצים זמינים בקטגוריה שנבחרה.")
         return
 
-    zip_path = f"{category}.zip"
+    # יצירת סיסמה אישית
+    user_password = generate_user_password()
+
+    zip_path = f"{category}_{user.id}.zip"
     temp_dir = tempfile.mkdtemp()
     temp_zip_path = os.path.join(temp_dir, zip_path)
 
     try:
-        # יצירת קובץ ZIP מוצפן
+        # יצירת ZIP מוצפן
         with pyzipper.AESZipFile(temp_zip_path, 'w',
                                  compression=pyzipper.ZIP_DEFLATED,
                                  encryption=pyzipper.WZ_AES) as zf:
-            zf.setpassword(PASSWORD.encode('utf-8'))
+            zf.setpassword(user_password.encode('utf-8'))
             for file_path in file_paths:
                 zf.write(file_path, os.path.basename(file_path))
 
         shutil.move(temp_zip_path, zip_path)
         shutil.rmtree(temp_dir)
 
-        # שמירת לוג במסד
+        # לוג במסד
         c = DB_CONN.cursor()
         c.execute('''
             INSERT INTO downloads (file_name, downloader_id, username, first_name, last_name, download_time)
@@ -116,12 +126,18 @@ async def download_zip_by_category(update: Update, context: ContextTypes.DEFAULT
         ''', (zip_path, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A", download_time))
         DB_CONN.commit()
 
+        # שליחת הסיסמה בנפרד
+        await query.message.reply_text(
+            f"🔐 סיסמה לפתיחת הקובץ: `{user_password}`",
+            parse_mode="Markdown"
+        )
+
+        # שליחת הקובץ
         with open(zip_path, 'rb') as file:
             await query.message.reply_document(
                 document=file,
                 filename=zip_path,
-                caption=f"📦 הקובץ שלך מוכן.\n🔐 סיסמה לפתיחה: `{PASSWORD}`",
-                parse_mode="Markdown"
+                caption="📦 הקובץ שלך מוכן. השתמש בסיסמה שנשלחה בהודעה נפרדת כדי לפתוח אותו."
             )
 
     except Exception as e:
@@ -129,8 +145,6 @@ async def download_zip_by_category(update: Update, context: ContextTypes.DEFAULT
 
     finally:
         download_lock.release()
-
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("📤 העלאת קובץ", callback_data='upload')],
@@ -406,8 +420,8 @@ async def main():
     app.add_handler(CallbackQueryHandler(send_playlist, pattern='download_playlist'))
     app.add_handler(CallbackQueryHandler(playlist_download_report, pattern='playlist_download_report'))
     app.add_handler(CallbackQueryHandler(download_users_list, pattern='download_users_list'))
-    app.add_handler(CallbackQueryHandler(download_zip_by_category, pattern='category_playlists'))
-    app.add_handler(CallbackQueryHandler(download_zip_by_category, pattern='category_apps'))
+    app.add_handler(CallbackQueryHandler(download_zip_by_category_secure, pattern='category_playlists'))
+    app.add_handler(CallbackQueryHandler(download_zip_by_category_secure, pattern='category_apps'))
 
     # חיבור לפונקציות שמייצרות גרפים
     app.add_handler(CallbackQueryHandler(plot_top_uploaders, pattern='plot_top_uploaders'))
