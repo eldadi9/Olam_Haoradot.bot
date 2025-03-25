@@ -329,21 +329,34 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.message.from_user
     file = update.message.document
+
+    if not file:
+        return
+
     file_name = file.file_name
     upload_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    category = 'פלייליסטים' if file_name.endswith(('.m3u', '.m3u8')) else 'אפליקציות' if file_name.endswith('.apk') else 'Other'
+    category = 'פלייליסטים' if file_name.endswith(('.m3u', '.m3u8')) else 'אפליקציות' if file_name.endswith('.apk') else 'אחר'
+
     os.makedirs(f'uploads/{category}', exist_ok=True)
     file_path = f'uploads/{category}/{file_name}'
+
     new_file = await context.bot.get_file(file.file_id)
     await new_file.download_to_drive(file_path)
+
+    # שמירה למסד
     c = DB_CONN.cursor()
-    c.execute('''INSERT OR REPLACE INTO files (file_id, file_name, uploader_id, username, first_name, last_name, category, upload_time)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-              (file.file_id, file_name, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A", category, upload_time))
+    c.execute('''
+        INSERT OR REPLACE INTO files (
+            file_id, file_name, uploader_id, username, first_name, last_name, category, upload_time
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        file.file_id, file_name, user.id, user.username or "N/A", user.first_name,
+        user.last_name or "N/A", category, upload_time
+    ))
     DB_CONN.commit()
 
-    update_excel()  # ⬅️ Automatically updates Excel after each file upload
-    await update.message.reply_text("✅ הקובץ הועלה בהצלחה.")
+    await update.message.reply_text("✅ הקובץ הועלה ונשמר בהצלחה.")
+
 
 
 async def monitor_group_file_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -616,6 +629,7 @@ async def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
     app.add_handler(MessageHandler(filters.Document.ALL, monitor_group_file_events))
     app.add_handler(MessageHandler(filters.Document.ALL, track_group_download))
+    app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
 
     # CallbackQueryHandlers לתפריט הדוחות
     app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
