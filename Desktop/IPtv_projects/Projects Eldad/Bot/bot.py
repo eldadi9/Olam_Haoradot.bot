@@ -16,6 +16,11 @@ import random
 import string
 from datetime import timedelta
 import logging
+from dotenv import load_dotenv
+
+
+load_dotenv()  # ← טוען משתני סביבה
+TOKEN = os.getenv('BOT_TOKEN')
 
 logging.basicConfig(
     filename='errors.log',
@@ -30,7 +35,6 @@ def log_error(error, context=""):
 # Global database connection
 DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 
-TOKEN = '7757317671:AAHlq8yWLzP4mrgEovVoVZb_2j9ilWt0OlQ'
 PASSWORD = 'olam_tov'  # סיסמת ZIP
 
 # מנעול למניעת הורדות כפולות בו-זמנית
@@ -100,26 +104,36 @@ def create_database():
         event_time TEXT
     )''')
 
-    def check_downloads_exist():
+def check_downloads_exist():
+    """בודק כמה רשומות יש בטבלה downloads"""
+    try:
         conn = sqlite3.connect('downloads.db')
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM downloads")
         count = c.fetchone()[0]
         conn.close()
         print(f"✅ כמות נתונים בטבלה downloads: {count}")
+    except Exception as e:
+        log_error(e, "check_downloads_exist")
 
-    # גיבוי ומחיקת downloads_group
+
+def backup_and_merge_downloads_group():
+    """מגבה את טבלת downloads_group ומאחד אותה ל־downloads"""
     try:
+        conn = sqlite3.connect('downloads.db')
+        c = conn.cursor()
+
         c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='downloads_group'")
         if c.fetchone():
             print("📋 מבצע גיבוי של טבלת downloads_group...")
 
+            # יצירת טבלת גיבוי אם צריך
             c.execute('''
                 CREATE TABLE IF NOT EXISTS downloads_group_backup AS
                 SELECT * FROM downloads_group
             ''')
 
-            # ממפה את השדות הקיימים לשדות החדשים
+            # הוספה ל־downloads
             c.execute('''
                 INSERT INTO downloads (
                     file_name, downloader_id, username, first_name, last_name,
@@ -130,14 +144,15 @@ def create_database():
                 FROM downloads_group
             ''')
 
+            # מחיקת הטבלה הישנה
             c.execute("DROP TABLE downloads_group")
             print("✅ טבלת downloads_group גובתה ונמחקה בהצלחה.")
 
+            conn.commit()
+        conn.close()
+
     except Exception as e:
-        log_error(e, "גיבוי ומחיקת downloads_group")
-
-    DB_CONN.commit()
-
+        log_error(e, "backup_and_merge_downloads_group")
 
 def generate_user_password(length=8):
     """יוצר סיסמה אקראית באורך נתון."""
@@ -356,7 +371,6 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     DB_CONN.commit()
 
     await update.message.reply_text("✅ הקובץ הועלה ונשמר בהצלחה.")
-
 
 
 async def monitor_group_file_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -578,8 +592,6 @@ async def download_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-
-
 def test_download_count():
     conn = sqlite3.connect('downloads.db')
     c = conn.cursor()
@@ -627,9 +639,8 @@ async def main():
 
     # existing callback handlers and other handlers
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
-    app.add_handler(MessageHandler(filters.Document.ALL, monitor_group_file_events))
-    app.add_handler(MessageHandler(filters.Document.ALL, track_group_download))
-    app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_all_documents))
+
 
     # CallbackQueryHandlers לתפריט הדוחות
     app.add_handler(CallbackQueryHandler(reports_menu, pattern='reports'))
@@ -676,6 +687,11 @@ async def main():
     finally:
         await app.updater.stop()
         await app.shutdown()
+
+async def handle_all_documents(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await monitor_group_file_events(update, context)
+    await track_group_download(update, context)
+    await file_handler(update, context)
 
 
 def load_data():
@@ -774,7 +790,6 @@ async def group_file_events_report(update: Update, context: ContextTypes.DEFAULT
             document=file,
             caption="📊 דוח פעולות קבצים בקבוצה"
         )
-
 
 async def plot_top_uploaders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """יוצר גרף של המשתמשים שהעלו הכי הרבה קבצים ושולח אותו"""
