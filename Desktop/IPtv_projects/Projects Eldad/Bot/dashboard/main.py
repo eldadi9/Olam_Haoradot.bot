@@ -42,6 +42,16 @@ async def overview(request: Request, credentials: HTTPBasicCredentials = Depends
 
     # טבלת הורדות
     df_downloads = pd.read_sql("SELECT * FROM downloads", conn)
+
+    # קבצים שצפו לאחרונה (מהטבלה group_file_events)
+    df_views = pd.read_sql_query('''
+        SELECT file_name, username, event_time
+        FROM group_file_events
+        WHERE event_type = 'view'
+        ORDER BY event_time DESC
+        LIMIT 10
+    ''', conn)
+
     conn.close()
 
     df_all_files = pd.concat([df_files1, df_files2], ignore_index=True)
@@ -53,14 +63,18 @@ async def overview(request: Request, credentials: HTTPBasicCredentials = Depends
     top_uploaders = df_all_files['username'].value_counts().head(5).to_dict()
 
     recent_files = df_all_files.sort_values(by="upload_time", ascending=False).head(20).to_dict(orient="records")
+    recent_views = df_views.to_dict(orient="records")  # ← חדש
 
     template = templates.get_template('index.html')
     return template.render(
         total_files=total_files,
         total_downloads=total_downloads,
         top_uploaders=top_uploaders,
-        recent_files=recent_files
+        recent_files=recent_files,
+        recent_views=recent_views   # ← להוסיף את זה כאן!!
     )
+
+
 
 # 🏠 כתובת נוספת /dashboard שמחזירה גם את overview
 @app.get("/dashboard", response_class=HTMLResponse)
