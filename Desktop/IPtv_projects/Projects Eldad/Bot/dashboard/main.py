@@ -43,6 +43,24 @@ async def overview(request: Request, credentials: HTTPBasicCredentials = Depends
     # טבלת הורדות
     df_downloads = pd.read_sql("SELECT * FROM downloads", conn)
 
+    # 📄 קבצי פלייליסטים
+    df_playlists = df_files1[df_files1['category'] == 'פלייליסטים']
+
+    # 📱 קבצי אפליקציות
+    df_apps = df_files1[df_files1['category'] == 'אפליקציות']
+
+    # 📥 קבצים שהורדו לאחרונה
+    df_recent_downloads = pd.read_sql_query('''
+        SELECT file_name, username, download_time
+        FROM downloads
+        ORDER BY download_time DESC
+        LIMIT 10
+    ''', conn)
+
+    recent_playlists = df_playlists.sort_values(by="upload_time", ascending=False).to_dict(orient="records")
+    recent_apps = df_apps.sort_values(by="upload_time", ascending=False).to_dict(orient="records")
+    recent_downloads = df_recent_downloads.to_dict(orient="records")
+
     # קבצים שצפו לאחרונה (מהטבלה group_file_events)
     df_views = pd.read_sql_query('''
         SELECT file_name, username, event_time
@@ -66,14 +84,17 @@ async def overview(request: Request, credentials: HTTPBasicCredentials = Depends
     recent_views = df_views.to_dict(orient="records")  # ← חדש
 
     template = templates.get_template('index.html')
+
     return template.render(
         total_files=total_files,
         total_downloads=total_downloads,
         top_uploaders=top_uploaders,
         recent_files=recent_files,
-        recent_views=recent_views   # ← להוסיף את זה כאן!!
+        recent_downloads=recent_downloads,
+        recent_views=recent_views,
+        recent_playlists=recent_playlists,
+        recent_apps=recent_apps
     )
-
 
 
 # 🏠 כתובת נוספת /dashboard שמחזירה גם את overview
