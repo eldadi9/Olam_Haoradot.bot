@@ -1,47 +1,56 @@
-
+# ✅ ייבוא ספריות
 import os
 import sqlite3
 import asyncio
 import platform
-from datetime import datetime
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
-from zipfile import ZipFile, ZIP_DEFLATED
-from threading import Lock
-import shutil
-import tempfile
-import pandas as pd
-import pyzipper
+import logging
 import random
 import string
-from datetime import timedelta
-import logging
+from datetime import datetime, timedelta
+import tempfile
+import shutil
+
 from dotenv import load_dotenv
+import pandas as pd
+import pyzipper
 
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes
+)
 
-load_dotenv()  # ← טוען משתני סביבה
+# ✅ טעינת משתני סביבה
+load_dotenv()
 TOKEN = os.getenv('BOT_TOKEN')
 
+# ✅ הגדרות כלליות
+ADMIN_ID = 7773889743
+GROUP_ID = -1002464592389
+TOPIC_NAME = "פלייליסטים"
+PASSWORD = "olam_tov"
+
+# ✅ התחברות למסד נתונים
+DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
+
+# ✅ מנעול למניעת הורדות כפולות
+download_lock = asyncio.Lock()
+
+# ✅ הגדרות לוגים
 logging.basicConfig(
     filename='errors.log',
     level=logging.ERROR,
     format='[%(asctime)s] %(levelname)s: %(message)s'
 )
 
+# ✅ פונקציה ללוג שגיאות
 def log_error(error, context=""):
     logging.error(f"{context}: {str(error)}")
 
-
-# Global database connection
-DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
-
-PASSWORD = 'olam_tov'  # סיסמת ZIP
-
-# מנעול למניעת הורדות כפולות בו-זמנית
-download_lock = Lock()
-
-# Global database connection
-DB_CONN = sqlite3.connect('downloads.db', check_same_thread=False)
 
 
 def create_database():
@@ -228,18 +237,42 @@ async def download_zip_by_category_secure(update: Update, context: ContextTypes.
         download_lock.release()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("📤 העלאת קובץ", callback_data='upload')],
-                [InlineKeyboardButton("📥 הורדת קבצים", callback_data='download')],
-                [InlineKeyboardButton("📊 הצגת דוחות", callback_data='reports')]]
+    keyboard = [
+        [InlineKeyboardButton("📤 העלאת קובץ", callback_data='upload')],
+        [InlineKeyboardButton("📥 הורדת קבצים", callback_data='download')],
+        [InlineKeyboardButton("📊 הצגת דוחות", callback_data='reports')],
+        [InlineKeyboardButton("📋 תפריט מתקדם", callback_data='advanced_menu')]  # ← חדש
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.message:
         await update.message.reply_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
     else:
         await update.callback_query.message.edit_text("ברוכים הבאים! מה תרצה לעשות?", reply_markup=reply_markup)
 
-GROUP_ID = -1002464592389  # Replace with your group's actual
-TOPIC_NAME = "פלייליסטים"   # Your actual topic name
+# נשאר כמו שהיה:
+GROUP_ID = -1002464592389
+TOPIC_NAME = "פלייליסטים"
 ADMIN_ID = 7773889743
+
+async def advanced_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("📂 צפייה בקבצים שהועלו", callback_data='uploaded_files')],
+        [InlineKeyboardButton("📥 הורדות אחרונות", callback_data='download_logs')],
+        [InlineKeyboardButton("📊 יצירת דוחות גרפיים", callback_data='generate_reports')],
+        [InlineKeyboardButton("📈 סיכום סטטיסטיקות כולל", callback_data='stats_summary')],
+        [InlineKeyboardButton("🧩 סטטיסטיקות בקבוצה", callback_data='group_stats')],
+        [InlineKeyboardButton("🆔 הצגת מזהה קבוצה", callback_data='getid')],
+        [InlineKeyboardButton("👥 רשימת משתמשים שהורידו", callback_data='download_users_list')],
+        [InlineKeyboardButton("💻 סיכום לפי פלטפורמה ומכשיר", callback_data='platform_summary_report')],
+        [InlineKeyboardButton("🗂️ דוח פעולות קבצים בקבוצה", callback_data='group_file_events_report')],
+        [InlineKeyboardButton("🎵 דוח הורדות פלייליסט", callback_data='playlist_download_report')],
+        [InlineKeyboardButton("📅 סינון פעולות לפי תאריכים", callback_data='group_file_events_filter')],
+        [InlineKeyboardButton("⬅️ חזרה", callback_data='start')]  # כפתור חזרה
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await update.callback_query.message.edit_text("📋 תפריט מתקדם - בחר פעולה:", reply_markup=reply_markup)
+
+
 
 async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Bans users from joining the group if they don't have a username (@handle)."""
@@ -488,28 +521,46 @@ async def download_zip_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def uploaded_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """מציג רשימה מסודרת של הקבצים שהועלו (Excel עם פילטרים)."""
-    user = update.callback_query.from_user
+    """📂 שליחת רשימת קבצים שהועלו מהבוט ומהקבוצה."""
+    try:
+        user = update.callback_query.from_user
 
-    if user.id != 7773889743:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
-        return
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות ברשימה זו.", show_alert=True)
+            return
 
-    conn = sqlite3.connect('downloads.db')
-    df = pd.read_sql_query('SELECT file_name AS "שם הקובץ", username AS "שם משתמש", uploader_id AS "מזהה משתמש", category AS "קטגוריה", upload_time AS "זמן העלאה" FROM files', conn)
-    conn.close()
+        conn = sqlite3.connect('downloads.db')
 
-    if df.empty:
-        await update.callback_query.message.edit_text("📂 אין קבצים זמינים.")
-        return
+        # טבלת קבצים מהבוט
+        df_files = pd.read_sql_query('''
+            SELECT file_name, username, uploader_id AS user_id, category, upload_time
+            FROM files
+        ''', conn)
 
-    output_file = "uploaded_files.xlsx"
-    df.to_excel(output_file, index=False)
+        # טבלת קבצים מהקבוצה
+        df_group = pd.read_sql_query('''
+            SELECT file_name, username, downloader_id AS user_id, 'מהקבוצה' AS category, download_time AS upload_time
+            FROM downloads_group
+        ''', conn)
 
-    await update.callback_query.message.reply_document(
-        document=open(output_file, 'rb'),
-        caption="📂 רשימת קבצים שהועלו (Excel מפורט עם אפשרות פילטר וסינון)"
-    )
+        conn.close()
+
+        # איחוד טבלאות
+        df_all = pd.concat([df_files, df_group], ignore_index=True)
+
+        # יצירת קובץ Excel
+        output_file = "uploaded_files.xlsx"
+        df_all.to_excel(output_file, index=False)
+
+        await update.callback_query.message.reply_document(
+            document=open(output_file, 'rb'),
+            caption="📂 רשימת קבצים שהועלו (מהבוט ומהקבוצה)"
+        )
+
+    except Exception as e:
+        print(f"שגיאה ב-uploaded_files: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה בשליחת רשימת קבצים.")
+
 
 def print_downloads_columns():
     conn = sqlite3.connect('downloads.db')
@@ -553,43 +604,51 @@ def update_excel():
 
 
 async def download_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """יוצר קובץ Excel עם כל ההורדות"""
-    user = update.callback_query.from_user
+    """📥 שליחת לוג הורדות אחרונות."""
+    try:
+        user = update.callback_query.from_user
 
-    if user.id != ADMIN_ID:
-        await update.callback_query.answer("אין לך הרשאה לצפות בלוג זה.", show_alert=True)
-        return
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות בלוג הורדות.", show_alert=True)
+            return
 
-    conn = sqlite3.connect('downloads.db')
-    df = pd.read_sql_query('''
-        SELECT
-            downloader_id AS "מזהה משתמש",
-            username AS "שם משתמש",
-            first_name AS "שם פרטי",
-            last_name AS "שם משפחה",
-            file_name AS "שם קובץ",
-            download_time AS "תאריך הורדה",
-            platform AS "פלטפורמה",
-            device_type AS "סוג מכשיר",
-            notes AS "הערות",
-            source AS "מקור"
-        FROM downloads
-        ORDER BY download_time DESC
-        LIMIT 100
-    ''', conn)
-    conn.close()
+        conn = sqlite3.connect('downloads.db')
 
-    if df.empty:
-        await update.callback_query.message.edit_text("📥 אין נתונים להצגה בלוג.")
-        return
+        df = pd.read_sql_query('''
+            SELECT
+                downloader_id AS "מזהה משתמש",
+                username AS "שם משתמש",
+                first_name AS "שם פרטי",
+                last_name AS "שם משפחה",
+                file_name AS "שם קובץ",
+                download_time AS "זמן הורדה",
+                source AS "מקור",
+                platform AS "פלטפורמה",
+                device_type AS "סוג מכשיר",
+                notes AS "הערות"
+            FROM downloads
+            ORDER BY download_time DESC
+            LIMIT 100
+        ''', conn)
 
-    output_file = "download_logs.xlsx"
-    df.to_excel(output_file, index=False)
+        conn.close()
 
-    await update.callback_query.message.reply_document(
-        document=open(output_file, 'rb'),
-        caption="📥 לוג הורדות אחרונות (Excel)"
-    )
+        if df.empty:
+            await update.callback_query.message.edit_text("📭 אין הורדות להצגה.")
+            return
+
+        output_file = "download_logs.xlsx"
+        df.to_excel(output_file, index=False)
+
+        await update.callback_query.message.reply_document(
+            document=open(output_file, 'rb'),
+            caption="📥 לוג 100 הורדות אחרונות (Excel)"
+        )
+
+    except Exception as e:
+        print(f"שגיאה ב-download_logs: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה בשליחת לוג הורדות.")
+
 
 
 def test_download_count():
@@ -605,21 +664,68 @@ async def show_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def generate_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """יוצר דוחות ויזואליים ושולח למשתמש."""
-    user = update.callback_query.from_user  # תיקון
+    """📊 יצירת גרפים חכמים ושליחתם."""
+    try:
+        user = update.callback_query.from_user
 
-    if user.id != 7773889743:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
-        return
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה ליצירת דוחות.", show_alert=True)
+            return
 
-    # ✨ הוספת הודעה לפני יצירת הדוחות
-    await update.callback_query.message.edit_text("🔎 יצירת דוחות... נא להמתין.")
+        await update.callback_query.message.edit_text("⏳ מייצר עבורך דוחות... המתן בבקשה...")
 
-    await plot_top_uploaders(update, context)
-    await plot_download_activity(update, context)
+        conn = sqlite3.connect('downloads.db')
+        df_downloads = pd.read_sql_query('SELECT * FROM downloads', conn)
+        df_events = pd.read_sql_query('SELECT * FROM group_file_events', conn)
+        conn.close()
 
-    # ✨ לאחר השלמת הדוחות, עדכון המשתמש
-    await update.callback_query.message.edit_text("✅ דוחות נוצרו ונשלחו בהצלחה!")
+        # 🎯 גרף 1: פעילות יומית (downloads)
+        if not df_downloads.empty:
+            df_downloads['download_time'] = pd.to_datetime(df_downloads['download_time'], errors='coerce')
+            df_downloads['date'] = df_downloads['download_time'].dt.date
+            daily_downloads = df_downloads['date'].value_counts().sort_index()
+
+            plt.figure(figsize=(10,6))
+            daily_downloads.plot(kind='line', marker='o')
+            plt.title('📈 הורדות יומיות')
+            plt.xlabel('תאריך')
+            plt.ylabel('מספר הורדות')
+            plt.grid()
+            plt.tight_layout()
+            plt.savefig('daily_downloads_report.png')
+            plt.close()
+
+            await update.callback_query.message.reply_document(
+                document=open('daily_downloads_report.png', 'rb'),
+                caption="📈 גרף הורדות יומיות"
+            )
+
+        # 🎯 גרף 2: טבלת פעולות מהקבוצה (views/downloads)
+        if not df_events.empty:
+            df_events['event_time'] = pd.to_datetime(df_events['event_time'], errors='coerce')
+            df_events['date'] = df_events['event_time'].dt.date
+            daily_events = df_events['date'].value_counts().sort_index()
+
+            plt.figure(figsize=(10,6))
+            daily_events.plot(kind='bar')
+            plt.title('📊 פעולות בקבוצה לפי תאריך')
+            plt.xlabel('תאריך')
+            plt.ylabel('מספר פעולות')
+            plt.tight_layout()
+            plt.savefig('group_events_report.png')
+            plt.close()
+
+            await update.callback_query.message.reply_document(
+                document=open('group_events_report.png', 'rb'),
+                caption="📊 גרף פעולות קבוצה"
+            )
+
+        await update.callback_query.message.edit_text("✅ הדוחות נוצרו ונשלחו בהצלחה!")
+
+    except Exception as e:
+        print(f"שגיאה ב-generate_reports: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה ביצירת הדוחות.")
+
 
 async def main():
     create_database()
@@ -633,6 +739,7 @@ async def main():
     app.add_handler(CommandHandler("generate_reports", generate_reports))
     app.add_handler(CommandHandler("stats_summary", stats_summary))
     app.add_handler(CommandHandler("group_stats", group_stats))
+    app.add_handler(CallbackQueryHandler(advanced_menu, pattern='advanced_menu'))
 
     # <-- ADD YOUR NEW HANDLER HERE!
     app.add_handler(CommandHandler("getid", show_group_id))
@@ -640,6 +747,11 @@ async def main():
     # existing callback handlers and other handlers
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_all_documents))
+
+    app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 2), pattern='filter_days_2'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 7), pattern='filter_days_7'))
+    app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 30), pattern='filter_days_30'))
+
 
 
     # CallbackQueryHandlers לתפריט הדוחות
@@ -733,63 +845,88 @@ async def plot_download_activity(update: Update, context: ContextTypes.DEFAULT_T
         caption="📈 גרף פעילות הורדות יומית"
     )
 async def playlist_download_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.callback_query.from_user
+    """🎵 דוח הורדות קובץ פלייליסט ספציפי"""
+    try:
+        user = update.callback_query.from_user
 
-    if user.id != 7773889743:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
-        return
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות בדוח זה.", show_alert=True)
+            return
 
-    conn = sqlite3.connect('downloads.db')
-    query = '''
-        SELECT user_id, username, first_name, last_name, file_name, interaction_time
-        FROM file_interactions
-        WHERE file_name = ?
-    '''
-    df = pd.read_sql_query(query, conn, params=('EG(Israel)17.3.25.m3u',))
-    conn.close()
+        conn = sqlite3.connect('downloads.db')
+        df = pd.read_sql_query('''
+            SELECT 
+                user_id AS "מזהה משתמש",
+                username AS "שם משתמש",
+                first_name AS "שם פרטי",
+                last_name AS "שם משפחה",
+                file_name AS "שם קובץ",
+                interaction_time AS "זמן הורדה"
+            FROM file_interactions
+            WHERE file_name = ?
+            ORDER BY interaction_time DESC
+        ''', conn, params=('EG(Israel)17.3.25.m3u',))  # ← כאן שם הקובץ הקבוע (אפשר לשדרג בעתיד לבחירה דינמית)
+        conn.close()
 
-    if df.empty:
-        await update.callback_query.message.edit_text("אין הורדות של הקובץ המבוקש.")
-        return
+        if df.empty:
+            await update.callback_query.message.edit_text("📄 לא נמצאו הורדות לקובץ הפלייליסט שביקשת.")
+            return
 
-    report_file = "playlist_user_interactions.xlsx"
-    df.to_excel(report_file, index=False)
+        file_path = "playlist_download_report.xlsx"
+        df.to_excel(file_path, index=False)
 
-    await update.callback_query.message.reply_document(
-        document=open(report_file, 'rb'),
-        caption="📥 דוח מפורט: מי הוריד את הקובץ EG(Israel)17.3.25.m3u"
-    )
+        await update.callback_query.message.reply_document(
+            document=open(file_path, 'rb'),
+            caption="🎵 דוח הורדות פלייליסט (קובץ Excel מצורף)"
+        )
+
+    except Exception as e:
+        print(f"שגיאה ב-playlist_download_report: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה ביצירת דוח הורדות פלייליסט.")
 
 
 async def group_file_events_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.callback_query.from_user
-    if user.id != 7773889743:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
-        return
+    """🗂️ דוח פעולות קבצים בקבוצה"""
+    try:
+        user = update.callback_query.from_user
 
-    conn = sqlite3.connect('downloads.db')
-    df = pd.read_sql_query('''
-        SELECT file_name AS "שם קובץ", file_type AS "סוג קובץ", username AS "שם משתמש",
-               first_name AS "שם פרטי", last_name AS "שם משפחה",
-               event_type AS "סוג פעולה", topic_name AS "נושא", event_time AS "זמן"
-        FROM group_file_events
-        WHERE chat_id = ?
-        ORDER BY event_time DESC
-    ''', conn, params=(GROUP_ID,))
-    conn.close()
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות בדוח זה.", show_alert=True)
+            return
 
-    if df.empty:
-        await update.callback_query.message.edit_text("אין נתונים מהקבוצה.")
-        return
+        conn = sqlite3.connect('downloads.db')
+        df = pd.read_sql_query('''
+            SELECT 
+                file_name AS "שם קובץ",
+                file_type AS "סוג קובץ",
+                username AS "שם משתמש",
+                event_type AS "סוג פעולה",
+                topic_name AS "נושא",
+                event_time AS "זמן פעולה"
+            FROM group_file_events
+            WHERE chat_id = ?
+            ORDER BY event_time DESC
+            LIMIT 100
+        ''', conn, params=(GROUP_ID,))
+        conn.close()
 
-    file_path = "group_file_events.xlsx"
-    df.to_excel(file_path, index=False)
+        if df.empty:
+            await update.callback_query.message.edit_text("📂 אין פעולות קבצים מהקבוצה להצגה.")
+            return
 
-    with open(file_path, 'rb') as file:
+        file_path = "group_file_events_report.xlsx"
+        df.to_excel(file_path, index=False)
+
         await update.callback_query.message.reply_document(
-            document=file,
-            caption="📊 דוח פעולות קבצים בקבוצה"
+            document=open(file_path, 'rb'),
+            caption="🗂️ דוח פעולות קבצים מהקבוצה (קובץ Excel מצורף)"
         )
+
+    except Exception as e:
+        print(f"שגיאה ב-group_file_events_report: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה ביצירת דוח פעולות קבצים מהקבוצה.")
+
+
 
 async def plot_top_uploaders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """יוצר גרף של המשתמשים שהעלו הכי הרבה קבצים ושולח אותו"""
@@ -818,55 +955,71 @@ async def plot_top_uploaders(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def stats_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """שולח למשתמש סיכום סטטיסטיקות כולל ומידע נוסף על הורדות."""
-    user = update.callback_query.from_user
+    """📈 שליחת סיכום סטטיסטיקות כולל"""
+    try:
+        user = update.callback_query.from_user
 
-    if user.id != 7773889743:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
-        return
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות בסטטיסטיקות.", show_alert=True)
+            return
 
-    files_data, downloads_data = load_data()
+        conn = sqlite3.connect('downloads.db')
+        df_files = pd.read_sql_query('SELECT * FROM files', conn)
+        df_downloads = pd.read_sql_query('SELECT * FROM downloads', conn)
+        conn.close()
 
-    total_uploads = len(files_data)
-    total_downloads = len(downloads_data)
+        total_uploads = len(df_files)
+        total_downloads = len(df_downloads)
 
-    # Check if there are any downloads to prevent errors
-    if downloads_data.empty:
-        await update.callback_query.message.edit_text("⚠️ אין מספיק נתונים להצגה.")
-        return
+        # 🏷️ הקטגוריה הכי פופולרית
+        if 'category' in df_files.columns and not df_files.empty:
+            top_category = df_files['category'].value_counts().idxmax()
+        else:
+            top_category = "אין מידע"
 
-    top_category = files_data['category'].value_counts().idxmax()
+        # 📄 הקובץ הכי מורד
+        if not df_downloads.empty:
+            top_file = df_downloads['file_name'].value_counts().idxmax()
+            top_file_count = df_downloads['file_name'].value_counts().max()
+        else:
+            top_file = "אין קבצים"
+            top_file_count = 0
 
-    # Most downloaded file
-    most_downloaded_file = downloads_data['file_name'].value_counts().idxmax()
-    most_downloaded_file_count = downloads_data['file_name'].value_counts().max()
+        # 👤 המשתמש שהוריד הכי הרבה
+        if not df_downloads.empty:
+            top_user_id = df_downloads['downloader_id'].value_counts().idxmax()
+            top_user_info = df_downloads[df_downloads['downloader_id'] == top_user_id].iloc[0]
+            top_user_username = top_user_info['username'] or "N/A"
+            top_user_firstname = top_user_info['first_name'] or ""
+            top_user_lastname = top_user_info['last_name'] or ""
+            top_user_downloads = df_downloads['downloader_id'].value_counts().max()
+        else:
+            top_user_id = "-"
+            top_user_username = "-"
+            top_user_firstname = "-"
+            top_user_lastname = "-"
+            top_user_downloads = 0
 
-    # User who downloaded the most files
-    top_downloader_id = downloads_data['downloader_id'].value_counts().idxmax()
-    top_downloader_downloads = downloads_data['downloader_id'].value_counts().max()
-    top_downloader_info = downloads_data[downloads_data['downloader_id'] == top_downloader_id].iloc[0]
+        # 📊 הכנת סיכום יפה
+        summary = (
+            f"📈 **סיכום סטטיסטיקות כולל**\n\n"
+            f"📂 סה\"כ קבצים שהועלו: {total_uploads}\n"
+            f"📥 סה\"כ הורדות: {total_downloads}\n"
+            f"🏷️ הקטגוריה הפופולרית ביותר: {top_category}\n\n"
+            f"🔥 הקובץ הכי פופולרי:\n"
+            f"`{top_file}` ({top_file_count} הורדות)\n\n"
+            f"🏆 המשתמש שהוריד הכי הרבה:\n"
+            f"👤 {top_user_firstname} {top_user_lastname} (@{top_user_username})\n"
+            f"🆔 {top_user_id}\n"
+            f"📥 {top_user_downloads} הורדות"
+        )
 
-    top_downloader_username = top_downloader_info['username']
-    top_downloader_firstname = top_downloader_info['first_name']
-    top_downloader_lastname = top_downloader_info['last_name']
+        await update.callback_query.message.edit_text(summary, parse_mode="Markdown")
 
-    summary = (
-        f"📊 **סיכום סטטיסטיקות כולל**:\n"
-        f"📁 **סך כל הקבצים שהועלו:** {total_uploads}\n"
-        f"📥 **סך כל ההורדות:** {total_downloads}\n"
-        f"📂 **הקטגוריה הפופולרית ביותר:** {top_category}\n\n"
+    except Exception as e:
+        print(f"שגיאה ב-stats_summary: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה ביצירת סיכום סטטיסטיקות.")
 
-        f"🔥 **הקובץ שהורד הכי הרבה:**\n"
-        f"📄 `{most_downloaded_file}` ({most_downloaded_file_count} הורדות)\n\n"
-
-        f"👤 **משתמש שהוריד הכי הרבה קבצים:**\n"
-        f"🆔 `{top_downloader_id}`\n"
-        f"💬 @{top_downloader_username}\n"
-        f"🙍‍♂️ {top_downloader_firstname} {top_downloader_lastname}\n"
-        f"📥 **מספר ההורדות:** {top_downloader_downloads}"
-    )
-
-    await update.callback_query.message.edit_text(summary, parse_mode='Markdown')
 async def group_download_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.callback_query.from_user
 
@@ -930,133 +1083,256 @@ async def group_download_report(update: Update, context: ContextTypes.DEFAULT_TY
         caption="📥 דוח מפורט: מי הוריד, מה הוריד, מתי והיכן"
     )
 
-async def group_file_events_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    keyboard = [
-        [InlineKeyboardButton("📆 יומיים אחרונים", callback_data='filter_days_2')],
-        [InlineKeyboardButton("🗓️ 7 ימים אחרונים", callback_data='filter_days_7')],
-        [InlineKeyboardButton("📅 חודש אחרון", callback_data='filter_days_30')],
-        [InlineKeyboardButton("⬅️ חזרה לתפריט הדוחות", callback_data='reports')]
-    ]
-    await update.callback_query.message.edit_text("בחר טווח תאריכים לדוח:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def group_file_events_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📅 תפריט סינון לפי טווחי תאריכים (2 ימים / 7 ימים / 30 ימים)"""
+    try:
+        await update.callback_query.answer()
+
+        keyboard = [
+            [InlineKeyboardButton("📆 יומיים אחרונים", callback_data='filter_days_2')],
+            [InlineKeyboardButton("🗓️ 7 ימים אחרונים", callback_data='filter_days_7')],
+            [InlineKeyboardButton("📅 חודש אחרון", callback_data='filter_days_30')],
+            [InlineKeyboardButton("⬅️ חזרה לתפריט הדוחות", callback_data='reports')]
+        ]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.callback_query.message.edit_text("📅 בחר טווח תאריכים להצגת פעולות:", reply_markup=reply_markup)
+
+    except Exception as e:
+        print(f"שגיאה ב-group_file_events_filter: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה בפתיחת תפריט הסינון לפי תאריכים.")
 
 async def group_file_events_filtered(update: Update, context: ContextTypes.DEFAULT_TYPE, days_back: int):
-    user = update.callback_query.from_user
-    if user.id != 7773889743:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
-        return
+    """📅 מחלץ קבצים מהקבוצה לפי מספר ימים אחורה"""
+    try:
+        user = update.callback_query.from_user
 
-    since = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d %H:%M:%S')
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות במידע זה.", show_alert=True)
+            return
 
-    conn = sqlite3.connect('downloads.db')
-    df = pd.read_sql_query('''
-        SELECT file_name AS "שם קובץ", file_type AS "סוג קובץ", username AS "שם משתמש",
-               first_name AS "שם פרטי", last_name AS "שם משפחה",
-               event_type AS "סוג פעולה", topic_name AS "נושא", event_time AS "זמן"
-        FROM group_file_events
-        WHERE chat_id = ? AND event_time >= ?
-        ORDER BY event_time DESC
-    ''', conn, params=(GROUP_ID, since))
-    conn.close()
+        since = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d %H:%M:%S')
 
-    if df.empty:
-        await update.callback_query.message.edit_text("📭 אין נתונים בטווח שבחרת.")
-        return
+        conn = sqlite3.connect('downloads.db')
+        df = pd.read_sql_query('''
+            SELECT file_name AS "שם קובץ", file_type AS "סוג קובץ", username AS "שם משתמש",
+                   first_name AS "שם פרטי", last_name AS "שם משפחה",
+                   event_type AS "סוג פעולה", topic_name AS "נושא", event_time AS "זמן"
+            FROM group_file_events
+            WHERE chat_id = ? AND event_time >= ?
+            ORDER BY event_time DESC
+        ''', conn, params=(GROUP_ID, since))
+        conn.close()
 
-    file_path = f"group_file_events_last_{days_back}_days.xlsx"
-    df.to_excel(file_path, index=False)
+        if df.empty:
+            await update.callback_query.message.edit_text("📭 אין נתונים בטווח שבחרת.")
+            return
 
-    with open(file_path, 'rb') as f:
+        file_path = f"group_file_events_last_{days_back}_days.xlsx"
+        df.to_excel(file_path, index=False)
+
+        with open(file_path, 'rb') as f:
+            await update.callback_query.message.reply_document(
+                document=f,
+                caption=f"📊 דוח פעולות קבצים בקבוצה ({days_back} ימים אחרונים)"
+            )
+
+    except Exception as e:
+        print(f"שגיאה ב-group_file_events_filtered: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה בשליפת הנתונים.")
+
+
+
+
+async def download_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """👥 רשימת כל המשתמשים שהורידו קבצים"""
+    try:
+        user = update.callback_query.from_user
+
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות במידע זה.", show_alert=True)
+            return
+
+        conn = sqlite3.connect('downloads.db')
+        df = pd.read_sql_query('''
+            SELECT
+                downloader_id AS "מזהה משתמש",
+                username AS "שם משתמש",
+                first_name AS "שם פרטי",
+                last_name AS "שם משפחה",
+                file_name AS "שם קובץ",
+                download_time AS "תאריך הורדה",
+                platform AS "פלטפורמה",
+                device_type AS "סוג מכשיר",
+                version AS "גרסה",
+                notes AS "הערות",
+                file_size AS "גודל קובץ (bytes)",
+                source AS "מקור הורדה",
+                topic_name AS "נושא",
+                chat_id AS "מזהה קבוצה"
+            FROM downloads
+            ORDER BY download_time DESC
+        ''', conn)
+        conn.close()
+
+        if df.empty:
+            await update.callback_query.message.edit_text("📥 אין נתונים להצגה.")
+            return
+
+        output_file = "all_users_downloads.xlsx"
+        df.to_excel(output_file, index=False)
+
         await update.callback_query.message.reply_document(
-            document=f,
-            caption=f"📊 דוח פעולות קבצים בקבוצה ({days_back} ימים אחרונים)"
+            document=open(output_file, 'rb'),
+            caption="📥 דוח מלא: כל המשתמשים שהורידו קבצים"
         )
 
+    except Exception as e:
+        print(f"שגיאה ב-download_users_list: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה בעת יצירת דוח משתמשים.")
+
+
 async def group_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if user.id != 7773889743:
-        await update.message.reply_text("אין לך הרשאה לצפות במידע זה.")
-        return
+    """🧩 שליחת סיכום סטטיסטיקות מהקבוצה"""
+    try:
+        user = update.effective_user
 
-    conn = sqlite3.connect('downloads.db')
-    df = pd.read_sql_query('''
-        SELECT file_name, user_id, username, event_type, event_time
-        FROM group_file_events
-        WHERE chat_id = ?
-    ''', conn, params=(GROUP_ID,))
-    conn.close()
+        if user.id != ADMIN_ID:
+            await update.message.reply_text("❌ אין לך הרשאה לצפות במידע זה.")
+            return
 
-    if df.empty:
-        await update.message.reply_text("אין פעולות בקבוצה עד כה.")
-        return
+        conn = sqlite3.connect('downloads.db')
+        df = pd.read_sql_query('''
+            SELECT file_name, user_id, username, event_type, event_time
+            FROM group_file_events
+            WHERE chat_id = ?
+        ''', conn, params=(GROUP_ID,))
+        conn.close()
 
-    total_actions = len(df)
-    unique_users = df['user_id'].nunique()
-    top_file = df['file_name'].value_counts().idxmax()
-    top_user_id = df['user_id'].value_counts().idxmax()
-    top_user_name = df[df['user_id'] == top_user_id]['username'].iloc[0]
+        if df.empty:
+            await update.message.reply_text("📭 אין פעולות בקבוצה עד כה.")
+            return
 
-    summary = (
-        f"📊 **סטטיסטיקת קבוצה - סיכום כללי**\n"
-        f"🔢 פעולות בסה\"כ: {total_actions}\n"
-        f"👥 משתמשים שונים: {unique_users}\n"
-        f"🔥 קובץ פופולרי: `{top_file}`\n"
-        f"🏆 משתמש פעיל ביותר: @{top_user_name} ({top_user_id})"
-    )
+        total_actions = len(df)
+        unique_users = df['user_id'].nunique()
+        top_file = df['file_name'].value_counts().idxmax()
+        top_user_id = df['user_id'].value_counts().idxmax()
 
-    await update.message.reply_text(summary, parse_mode="Markdown")
+        top_user_info = df[df['user_id'] == top_user_id].iloc[0]
+        top_user_username = top_user_info['username'] or "N/A"
+
+        summary = (
+            f"🧩 **סטטיסטיקות קבוצה**\n\n"
+            f"🔢 סה\"כ פעולות: {total_actions}\n"
+            f"👥 מספר משתמשים שונים: {unique_users}\n"
+            f"🔥 הקובץ הכי פופולרי: `{top_file}`\n"
+            f"🏆 המשתמש הכי פעיל: @{top_user_username} ({top_user_id})"
+        )
+
+        await update.message.reply_text(summary, parse_mode="Markdown")
+
+    except Exception as e:
+        print(f"שגיאה ב-group_stats: {e}")
+        await update.message.reply_text("❌ שגיאה ביצירת סיכום פעילות בקבוצה.")
+
+
+async def getid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🆔 שליחת מזהה הקבוצה או המשתמש"""
+    try:
+        if update.message:
+            chat_id = update.message.chat_id
+            user_id = update.message.from_user.id
+
+            text = (
+                f"🆔 **המזהים שלך:**\n\n"
+                f"• מזהה משתמש: `{user_id}`\n"
+                f"• מזהה קבוצה: `{chat_id}`"
+            )
+            await update.message.reply_text(text, parse_mode="Markdown")
+
+        elif update.callback_query:
+            chat_id = update.callback_query.message.chat_id
+            user_id = update.callback_query.from_user.id
+
+            text = (
+                f"🆔 **המזהים שלך:**\n\n"
+                f"• מזהה משתמש: `{user_id}`\n"
+                f"• מזהה קבוצה: `{chat_id}`"
+            )
+            await update.callback_query.message.edit_text(text, parse_mode="Markdown")
+
+    except Exception as e:
+        print(f"שגיאה ב-getid: {e}")
+        if update.message:
+            await update.message.reply_text("❌ שגיאה בשליפת מזהה.")
+        elif update.callback_query:
+            await update.callback_query.answer("❌ שגיאה בשליפת מזהה.", show_alert=True)
+
 
 async def platform_summary_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.callback_query.from_user
+    """💻 סיכום לפי פלטפורמה ומכשיר"""
+    try:
+        user = update.callback_query.from_user
 
-    if user.id != ADMIN_ID:
-        await update.callback_query.answer("אין לך הרשאה לצפות בדוח זה.", show_alert=True)
-        return
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות בדוח זה.", show_alert=True)
+            return
 
-    conn = sqlite3.connect('downloads.db')
-    df = pd.read_sql_query('SELECT * FROM downloads', conn)
-    conn.close()
+        conn = sqlite3.connect('downloads.db')
+        df = pd.read_sql_query('SELECT * FROM downloads', conn)
+        conn.close()
 
-    if df.empty:
-        await update.callback_query.message.edit_text("📊 אין נתונים להצגה.")
-        return
+        if df.empty:
+            await update.callback_query.message.edit_text("📊 אין מספיק נתונים להצגה.")
+            return
 
-    summary = "**📊 סיכום לפי פלטפורמה / מכשיר:**\n\n"
+        summary = "**📊 סיכום לפי פלטפורמה / מכשיר:**\n\n"
 
-    if 'platform' in df.columns:
-        platform_counts = df['platform'].value_counts()
-        summary += "💻 **מערכות הפעלה:**\n"
-        for platform, count in platform_counts.items():
-            summary += f"• {platform}: {count}\n"
-        summary += "\n"
+        # פלטפורמות
+        if 'platform' in df.columns:
+            platform_counts = df['platform'].value_counts()
+            summary += "💻 **מערכות הפעלה:**\n"
+            for platform, count in platform_counts.items():
+                summary += f"• {platform}: {count}\n"
+            summary += "\n"
 
-    if 'device_type' in df.columns:
-        device_counts = df['device_type'].value_counts()
-        summary += "📱 **סוגי מכשירים:**\n"
-        for device, count in device_counts.items():
-            summary += f"• {device}: {count}\n"
-        summary += "\n"
+        # סוגי מכשירים
+        if 'device_type' in df.columns:
+            device_counts = df['device_type'].value_counts()
+            summary += "📱 **סוגי מכשירים:**\n"
+            for device, count in device_counts.items():
+                summary += f"• {device}: {count}\n"
+            summary += "\n"
 
-    if 'notes' in df.columns:
-        notes_counts = df['notes'].value_counts()
-        summary += "🏷️ **הערות נפוצות:**\n"
-        for note, count in notes_counts.items():
-            summary += f"• {note}: {count}\n"
-        summary += "\n"
+        # הערות נפוצות
+        if 'notes' in df.columns:
+            notes_counts = df['notes'].value_counts()
+            summary += "🏷️ **הערות נפוצות:**\n"
+            for note, count in notes_counts.items():
+                summary += f"• {note}: {count}\n"
+            summary += "\n"
 
-    if 'source' in df.columns:
-        source_counts = df['source'].value_counts()
-        summary += "🔄 **מקור הורדה:**\n"
-        for source, count in source_counts.items():
-            summary += f"• {source}: {count}\n"
-        summary += "\n"
+        # מקור הורדה
+        if 'source' in df.columns:
+            source_counts = df['source'].value_counts()
+            summary += "🔄 **מקור הורדה:**\n"
+            for source, count in source_counts.items():
+                summary += f"• {source}: {count}\n"
+            summary += "\n"
 
-    if 'file_size' in df.columns:
-        avg_size = df['file_size'].mean()
-        summary += f"📦 **גודל ממוצע של קובץ:** {int(avg_size):,} bytes\n"
+        # גודל ממוצע קבצים
+        if 'file_size' in df.columns:
+            avg_size = df['file_size'].mean()
+            summary += f"📦 **גודל ממוצע קובץ:** {int(avg_size):,} bytes\n"
 
-    await update.callback_query.message.edit_text(summary, parse_mode="Markdown")
+        await update.callback_query.message.edit_text(summary, parse_mode="Markdown")
+
+    except Exception as e:
+        print(f"שגיאה ב-platform_summary_report: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה ביצירת סיכום פלטפורמות.")
+
+
 
 
 async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1079,45 +1355,52 @@ async def reports_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def download_users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.callback_query.from_user
+    """👥 יצירת דוח רשימת משתמשים שהורידו קבצים"""
+    try:
+        user = update.callback_query.from_user
 
-    if user.id != ADMIN_ID:
-        await update.callback_query.answer("אין לך הרשאה לצפות במידע זה.", show_alert=True)
-        return
+        if user.id != ADMIN_ID:
+            await update.callback_query.answer("❌ אין לך הרשאה לצפות בדוח זה.", show_alert=True)
+            return
 
-    conn = sqlite3.connect('downloads.db')
-    df = pd.read_sql_query('''
-        SELECT
-            downloader_id AS "מזהה משתמש",
-            username AS "שם משתמש",
-            first_name AS "שם פרטי",
-            last_name AS "שם משפחה",
-            file_name AS "שם קובץ",
-            download_time AS "זמן הורדה",
-            platform AS "מערכת הפעלה",
-            device_type AS "סוג מכשיר",
-            version AS "גרסה",
-            notes AS "הערות",
-            file_size AS "גודל (bytes)",
-            source AS "מקור",
-            topic_name AS "נושא",
-            chat_id AS "מזהה קבוצה"
-        FROM downloads
-        ORDER BY download_time DESC
-    ''', conn)
-    conn.close()
+        conn = sqlite3.connect('downloads.db')
+        df = pd.read_sql_query('''
+            SELECT
+                downloader_id AS "מזהה משתמש",
+                username AS "שם משתמש",
+                first_name AS "שם פרטי",
+                last_name AS "שם משפחה",
+                file_name AS "שם קובץ",
+                download_time AS "זמן הורדה",
+                platform AS "מערכת הפעלה",
+                device_type AS "סוג מכשיר",
+                version AS "גרסה",
+                notes AS "הערות",
+                file_size AS "גודל (bytes)",
+                source AS "מקור הורדה",
+                topic_name AS "נושא",
+                chat_id AS "מזהה קבוצה"
+            FROM downloads
+            ORDER BY download_time DESC
+        ''', conn)
+        conn.close()
 
-    if df.empty:
-        await update.callback_query.message.edit_text("📥 אין נתונים של הורדות זמינים.")
-        return
+        if df.empty:
+            await update.callback_query.message.edit_text("📭 אין נתונים זמינים ליצירת דוח.")
+            return
 
-    output_file = "all_users_downloads.xlsx"
-    df.to_excel(output_file, index=False)
+        output_file = "all_users_downloads.xlsx"
+        df.to_excel(output_file, index=False)
 
-    await update.callback_query.message.reply_document(
-        document=open(output_file, 'rb'),
-        caption="📥 דוח: כל המשתמשים שהורידו קבצים"
-    )
+        await update.callback_query.message.reply_document(
+            document=open(output_file, 'rb'),
+            caption="👥 דוח מפורט: כל המשתמשים שהורידו קבצים"
+        )
+
+    except Exception as e:
+        print(f"שגיאה ב-download_users_list: {e}")
+        await update.callback_query.message.edit_text("❌ שגיאה ביצירת דוח משתמשים.")
+
 
 
 if __name__ == '__main__':

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>📊 סקירה כללית</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .search-box {
+            max-width: 300px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body class="container py-4">
+
+<h2 class="text-center mb-4">📈 סטטיסטיקה כללית</h2>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card text-white bg-primary mb-3">
+            <div class="card-body">
+                <h5 class="card-title">סה"כ קבצים</h5>
+                <p class="card-text display-6">{{ total_files }}</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card text-white bg-success mb-3">
+            <div class="card-body">
+                <h5 class="card-title">סה"כ הורדות</h5>
+                <p class="card-text display-6">{{ total_downloads }}</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<h4 class="mt-5">👤 משתמשים מובילים:</h4>
+<ul class="list-group mb-4">
+    {% for uploader, count in top_uploaders.items() %}
+    <li class="list-group-item d-flex justify-content-between">
+        {{ uploader }}
+        <span class="badge bg-primary rounded-pill">{{ count }}</span>
+    </li>
+    {% endfor %}
+</ul>
+
+<!-- 📄 קבצי פלייליסטים -->
+<button class="btn btn-primary mb-2" type="button" data-bs-toggle="collapse" data-bs-target="#playlistsCollapse">
+    📄 הצג קבצי פלייליסטים
+</button>
+<div class="collapse" id="playlistsCollapse">
+    <div class="card card-body mt-2">
+        <input type="text" class="form-control search-box" placeholder="🔍 חפש בפלייליסטים..." onkeyup="filterTable(this)">
+        <table class="table table-striped">
+            <thead><tr><th>שם קובץ</th><th>שם משתמש</th><th>תאריך העלאה</th></tr></thead>
+            <tbody>
+                {% for file in recent_playlists %}
+                <tr><td>{{ file.file_name }}</td><td>{{ file.username }}</td><td>{{ file.upload_time }}</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 📱 קבצי אפליקציות -->
+<button class="btn btn-success mt-3 mb-2" type="button" data-bs-toggle="collapse" data-bs-target="#appsCollapse">
+    📱 הצג קבצי אפליקציות
+</button>
+<div class="collapse" id="appsCollapse">
+    <div class="card card-body mt-2">
+        <input type="text" class="form-control search-box" placeholder="🔍 חפש באפליקציות..." onkeyup="filterTable(this)">
+        <table class="table table-striped">
+            <thead><tr><th>שם קובץ</th><th>שם משתמש</th><th>תאריך העלאה</th></tr></thead>
+            <tbody>
+                {% for file in recent_apps %}
+                <tr><td>{{ file.file_name }}</td><td>{{ file.username }}</td><td>{{ file.upload_time }}</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- 📥 קבצים שהורדו לאחרונה -->
+<h4 class="mt-5">📥 קבצים שהורדו לאחרונה:</h4>
+<input type="text" class="form-control search-box" placeholder="🔍 חפש בהורדות..." onkeyup="filterTable(this)">
+<table class="table table-bordered table-striped">
+    <thead class="table-dark">
+        <tr><th>שם קובץ</th><th>שם משתמש</th><th>תאריך הורדה</th></tr>
+    </thead>
+    <tbody>
+        {% for file in recent_downloads %}
+        <tr><td>{{ file.file_name }}</td><td>{{ file.username }}</td><td>{{ file.download_time }}</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<!-- 📺 קבצים שצפו לאחרונה -->
+<h4 class="mt-5">📺 קבצים שצפו לאחרונה:</h4>
+<input type="text" class="form-control search-box" placeholder="🔍 חפש בצפיות..." onkeyup="filterTable(this)">
+<table class="table table-bordered table-striped">
+    <thead class="table-dark">
+        <tr><th>שם קובץ</th><th>שם משתמש</th><th>תאריך צפייה</th></tr>
+    </thead>
+    <tbody>
+        {% for view in recent_views %}
+        <tr><td>{{ view.file_name }}</td><td>{{ view.username }}</td><td>{{ view.event_time }}</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<!-- 📤 קבצים שהועלו לאחרונה -->
+<h4 class="mt-5">📤 קבצים שהועלו לאחרונה:</h4>
+<input type="text" class="form-control search-box" placeholder="🔍 חפש בקבצים שהועלו..." onkeyup="filterTable(this)">
+<table class="table table-bordered table-striped">
+    <thead class="table-dark">
+        <tr>
+            <th>שם קובץ</th>
+            <th>משתמש</th>
+            <th>ID</th>
+            <th>קטגוריה</th>
+            <th>תאריך</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for file in recent_files %}
+        <tr>
+            <td>{{ file.file_name }}</td>
+            <td>@{{ file.username }}</td>
+            <td>{{ file.user_id }}</td>
+            <td>{{ file.category }}</td>
+            <td>{{ file.upload_time }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<!-- Bootstrap JS -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+// חיפוש כללי בכל טבלה
+function filterTable(input) {
+    const filter = input.value.toLowerCase();
+    const table = input.nextElementSibling;
+    const rows = table.getElementsByTagName("tr");
+    for (let i = 1; i < rows.length; i++) {
+        let show = false;
+        const cells = rows[i].getElementsByTagName("td");
+        for (const cell of cells) {
+            if (cell.textContent.toLowerCase().includes(filter)) {
+                show = true;
+                break;
+            }
+        }
+        rows[i].style.display = show ? "" : "none";
+    }
+}
+</script>
+
+</body>
+</html>
