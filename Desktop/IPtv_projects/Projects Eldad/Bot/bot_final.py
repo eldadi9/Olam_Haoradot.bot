@@ -294,45 +294,72 @@ async def new_member_check(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def track_group_download(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """רושם הורדות מקבוצת טלגרם לטבלת downloads המאוחדת"""
+    """רושם פעולה של הורדת קובץ מקבוצת טלגרם (כולל נושא ופרטים)"""
     try:
         message = update.message
-
-        if message.chat_id != GROUP_ID or (message.message_thread_id is None):
+        if not message or not message.document:
             return
 
-        topic = await context.bot.get_forum_topic(chat_id=message.chat_id, message_thread_id=message.message_thread_id)
-        if topic.name.lower() != TOPIC_NAME.lower():
+        if message.chat_id != GROUP_ID:
             return
 
-        if message.document:
-            file_name = message.document.file_name
-            file_size = message.document.file_size or 0  # 🆕
-            user = message.from_user
-            download_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        file_name = message.document.file_name
+        file_size = message.document.file_size or 0
+        user = message.from_user
+        user_id = user.id if user else None
+        username = user.username or "N/A"
+        first_name = user.first_name or "N/A"
+        last_name = user.last_name or "N/A"
+        download_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-            # ערכים משוערים (אין לנו מזה באופן מדויק)
-            device_type = "mobile"  # ברירת מחדל
-            platform = "Telegram"
-            version = None
-            notes = "group auto-download"
+        # 🧠 זיהוי נושא (thread/topic) אם קיים
+        topic_name = "לא זמין"
+        if message.is_topic_message and message.message_thread_id:
+            try:
+                topic = await context.bot.get_forum_topic(
+                    chat_id=message.chat_id,
+                    message_thread_id=message.message_thread_id
+                )
+                topic_name = topic.name
+            except Exception as e:
+                log_error(e, "track_group_download - get_forum_topic")
 
-            c = DB_CONN.cursor()
-            c.execute('''
-                INSERT INTO downloads (
-                    file_name, downloader_id, username, first_name, last_name,
-                    download_time, source, chat_id, topic_name,
-                    device_type, platform, version, notes, file_size
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                file_name, user.id, user.username or "N/A", user.first_name, user.last_name or "N/A",
-                download_time, "group", message.chat_id, topic.name,
+        # 🧾 שדות נוספים להשלמה
+        device_type = "mobile"  # אפשר לשפר בעתיד
+        platform = "Telegram"
+        version = None
+        notes = "group auto-download"
+
+        # 🔒 הכנסת נתונים לטבלת downloads המאוחדת
+        c = DB_CONN.cursor()
+        c.execute('''
+            INSERT INTO downloads (
+                file_name, downloader_id, username, first_name, last_name,
+                download_time, source, chat_id, topic_name,
                 device_type, platform, version, notes, file_size
-            ))
-            DB_CONN.commit()
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            file_name,
+            user_id,
+            username,
+            first_name,
+            last_name,
+            download_time,
+            "group",
+            message.chat_id,
+            topic_name,
+            device_type,
+            platform,
+            version,
+            notes,
+            file_size
+        ))
+        DB_CONN.commit()
+        print(f"✅ נרשמה הורדה: {file_name} ע״י {username} ({user_id})")
 
     except Exception as e:
         log_error(e, "track_group_download")
+
 
 
 async def send_playlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -381,84 +408,111 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.message.from_user
-    file = update.message.document
+    """שומר קובץ שהועלה (מהבוט או הקבוצה), לפי קטגוריה ומעדכן במסד"""
+    try:
+        message = update.message
+        if not message or not message.document:
+            return
 
-    if not file:
-        return
+        user = message.from_user
+        file = message.document
+        file_name = file.file_name
+        upload_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    file_name = file.file_name
-    upload_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    category = 'פלייליסטים' if file_name.endswith(('.m3u', '.m3u8')) else 'אפליקציות' if file_name.endswith('.apk') else 'אחר'
+        # 🎯 קביעת קטגוריה לפי סיומת הקובץ
+        if file_name.endswith(('.m3u', '.m3u8')):
+            category = 'פלייליסטים'
+        elif file_name.endswith('.apk'):
+            category = 'אפליקציות'
+        else:
+            category = 'אחר'
 
-    os.makedirs(f'uploads/{category}', exist_ok=True)
-    file_path = f'uploads/{category}/{file_name}'
+        # 📂 יצירת תיקייה לפי קטגוריה
+        os.makedirs(f'uploads/{category}', exist_ok=True)
+        file_path = f'uploads/{category}/{file_name}'
 
-    new_file = await context.bot.get_file(file.file_id)
-    await new_file.download_to_drive(file_path)
+        # ⬇️ הורדת הקובץ לטלגרם
+        telegram_file = await context.bot.get_file(file.file_id)
+        await telegram_file.download_to_drive(file_path)
 
-    # שמירה למסד
-    c = DB_CONN.cursor()
-    c.execute('''
-        INSERT OR REPLACE INTO files (
-            file_id, file_name, uploader_id, username, first_name, last_name, category, upload_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        file.file_id, file_name, user.id, user.username or "N/A", user.first_name,
-        user.last_name or "N/A", category, upload_time
-    ))
-    DB_CONN.commit()
+        # 🧾 רישום למסד הנתונים (files)
+        c = DB_CONN.cursor()
+        c.execute('''
+            INSERT OR REPLACE INTO files (
+                file_id, file_name, uploader_id, username, first_name, last_name,
+                category, upload_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            file.file_id,
+            file_name,
+            user.id,
+            user.username or "N/A",
+            user.first_name or "N/A",
+            user.last_name or "N/A",
+            category,
+            upload_time
+        ))
+        DB_CONN.commit()
 
-    await update.message.reply_text("✅ הקובץ הועלה ונשמר בהצלחה.")
+        # ✅ משוב למשתמש
+        await message.reply_text(f"✅ הקובץ נשמר תחת קטגוריה: {category}")
+
+    except Exception as e:
+        log_error(e, "file_handler")
+        await update.message.reply_text("❌ שגיאה בשמירת הקובץ.")
+
 
 
 async def monitor_group_file_events(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message or not message.document:
-        return
+    """רושם פעולת קובץ מהקבוצה למסד group_file_events"""
+    try:
+        message = update.message
+        if not message or not message.document:
+            return
 
-    if message.chat_id != GROUP_ID:
-        return
+        if message.chat_id != GROUP_ID:
+            return
 
-    topic_name = TOPIC_NAME
-    if message.is_topic_message and message.message_thread_id:
-        topic = await context.bot.get_forum_topic(chat_id=message.chat_id, message_thread_id=message.message_thread_id)
-        topic_name = topic.name
+        file = message.document
+        file_name = file.file_name
+        file_type = os.path.splitext(file_name)[-1].lower()
+        user = message.from_user
+        event_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    file_name = message.document.file_name
-    file_type = os.path.splitext(file_name)[-1].lower()
-    user = message.from_user
-    event_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        # ברירת מחדל
+        topic_name = "לא זמין"
 
-    # ניסיון לזיהוי נושא השיחה בקבוצה (thread)
-    topic_name = "לא זמין"
-    if message.is_topic_message and message.message_thread_id:
-        topic = await context.bot.get_forum_topic(
-            chat_id=message.chat_id,
-            message_thread_id=message.message_thread_id
-        )
-        topic_name = topic.name
+        # אם זו הודעה מתוך topic בקבוצה
+        if message.is_topic_message and message.message_thread_id:
+            topic = await context.bot.get_forum_topic(
+                chat_id=message.chat_id,
+                message_thread_id=message.message_thread_id
+            )
+            topic_name = topic.name
 
-    # הכנסה למסד הנתונים
-    c = DB_CONN.cursor()
-    c.execute('''
-        INSERT INTO group_file_events (
-            file_name, file_type, user_id, username, first_name, last_name,
-            event_type, chat_id, topic_name, event_time
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        file_name,
-        file_type,
-        user.id,
-        user.username or "N/A",
-        user.first_name,
-        user.last_name or "N/A",
-        "download",  # או "view" אם תתמוך בזיהוי עתידי
-        message.chat_id,
-        topic_name,
-        event_time
-    ))
-    DB_CONN.commit()
+        # 📥 רישום למסד group_file_events
+        c = DB_CONN.cursor()
+        c.execute('''
+            INSERT INTO group_file_events (
+                file_name, file_type, user_id, username, first_name, last_name,
+                event_type, chat_id, topic_name, event_time
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            file_name,
+            file_type,
+            user.id,
+            user.username or "N/A",
+            user.first_name or "N/A",
+            user.last_name or "N/A",
+            "download",
+            message.chat_id,
+            topic_name,
+            event_time
+        ))
+        DB_CONN.commit()
+
+    except Exception as e:
+        log_error(e, "monitor_group_file_events")
 
 
 
@@ -744,27 +798,37 @@ async def unified_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         if not message or not message.document:
             return
 
-        # ✅ בדיקה: האם ההודעה מהקבוצה שלך
+        # בדיקה: האם ההודעה מהקבוצה (ולא מפרטי)
         if message.chat_id != GROUP_ID:
             return
 
-        user = message.from_user
         file_name = message.document.file_name or "לא ידוע"
-        print(f"📥 DEBUG: קובץ חדש מהקבוצה: {file_name} - על ידי {user.first_name} (@{user.username})")
+        user = message.from_user
+        user_id = user.id if user else None
+        username = user.username if user else "N/A"
+        first_name = user.first_name if user else "N/A"
+        last_name = user.last_name if user and user.last_name else "N/A"
 
-        # ✅ שליחת התראה לטלגרם
+        print(f"📥 קובץ מהקבוצה: {file_name} - ע״י {first_name} (@{username})")
+
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"📥 קובץ מהקבוצה\n👤 {user.first_name} (@{user.username})\n📄 {file_name}"
+            text=(
+                f"📥 קובץ חדש מהקבוצה\n"
+                f"👤 {first_name} (@{username})\n"
+                f"🆔 {user_id}\n"
+                f"📄 {file_name}"
+            )
         )
 
-        # ✅ קריאה לכל הפונקציות הרלוונטיות
+        # קריאה לפונקציות לוגיות מלאות
         await monitor_group_file_events(update, context)
         await track_group_download(update, context)
         await file_handler(update, context)
 
     except Exception as e:
         log_error(e, "unified_file_handler")
+
 
 
 
