@@ -738,10 +738,42 @@ async def generate_reports(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.message.edit_text("❌ שגיאה ביצירת הדוחות.")
 
 
+async def unified_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        message = update.message
+        if not message or not message.document:
+            return
+
+        # ✅ בדיקה: האם ההודעה מהקבוצה שלך
+        if message.chat_id != GROUP_ID:
+            return
+
+        user = message.from_user
+        file_name = message.document.file_name or "לא ידוע"
+        print(f"📥 DEBUG: קובץ חדש מהקבוצה: {file_name} - על ידי {user.first_name} (@{user.username})")
+
+        # ✅ שליחת התראה לטלגרם
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"📥 קובץ מהקבוצה\n👤 {user.first_name} (@{user.username})\n📄 {file_name}"
+        )
+
+        # ✅ קריאה לכל הפונקציות הרלוונטיות
+        await monitor_group_file_events(update, context)
+        await track_group_download(update, context)
+        await file_handler(update, context)
+
+    except Exception as e:
+        log_error(e, "unified_file_handler")
+
+
+
 async def main():
     create_database()
 
     app = Application.builder().token(TOKEN).build()
+
+    app.add_handler(MessageHandler(filters.Document.ALL & filters.Chat(GROUP_ID), unified_file_handler))
 
     # פקודות
     app.add_handler(CommandHandler("start", start))
@@ -754,11 +786,11 @@ async def main():
 
     # <-- ADD YOUR NEW HANDLER HERE!
     app.add_handler(CommandHandler("getid", show_group_id))
-    app.add_handler(MessageHandler(filters.ALL, debug_all_messages))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Chat(GROUP_ID), debug_all_messages))
+
 
     # existing callback handlers and other handlers
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_check))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_all_documents))
 
     app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 2), pattern='filter_days_2'))
     app.add_handler(CallbackQueryHandler(lambda u, c: group_file_events_filtered(u, c, 7), pattern='filter_days_7'))
@@ -793,8 +825,6 @@ async def main():
     # כפתור חזרה לתפריט הראשי
     app.add_handler(CallbackQueryHandler(start, pattern='start'))
 
-    # מאזין להעלאת קבצים
-    app.add_handler(MessageHandler(filters.Document.ALL, file_handler))
 
     if platform.system() == "Windows":
         asyncio.set_event_loop(asyncio.ProactorEventLoop())
@@ -1373,3 +1403,6 @@ if __name__ == '__main__':
     else:
         loop = asyncio.get_event_loop()
         loop.run_until_complete(main())
+
+
+
